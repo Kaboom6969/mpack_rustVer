@@ -1,0 +1,17 @@
+﻿---
+description: Dual-layer architecture and MPack module boundaries
+alwaysApply: true
+---
+# Dual-Layer Architecture
+- **Safe Rust core**: idiomatic types (`Vec<u8>`, `Result`, enums for tags/errors). Prefer zero `unsafe` in encode/decode algorithms.
+- **FFI layer**: `#[repr(C)]` + `#[no_mangle] pub extern "C"` matching MPack C ABI (`mpack_reader_t`, `mpack_writer_t`, `mpack_tree_t`, `mpack_node_t`, `mpack_tag_t`, `mpack_error_t`, …) so the original suite links unchanged.
+- **Public C headers**: keep under `include/` as the ABI contract; thin C adapters (if needed) live outside `tests/original/`.
+# Module Map (mirror C)
+| C surface | Responsibility |
+| --- | --- |
+| common / platform | tags, errors, tracking, config semantics |
+| writer (+ builder) | encode, growable buffer, compound size |
+| reader | incremental / buffered decode |
+| expect | schema-typed reads on top of reader |
+| node | tree/DOM parse + typed accessors |
+Port vertical slices in that dependency order when possible: common → writer/reader → expect → node.
