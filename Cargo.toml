@@ -40,6 +40,10 @@ name = "reader_core"
 path = "tests/port/reader_core.rs"
 
 [[test]]
+name = "safe_core_api"
+path = "tests/port/safe_core_api.rs"
+
+[[test]]
 name = "full_abi_layout"
 path = "tests/port/full_abi_layout.rs"
 required-features = ["full-suite-abi"]
