@@ -749,3 +749,259 @@ fn double__sticky_error_noop() {
     assert_eq!(reader.used(), used_before);
 }
 
+// ===========================================================================
+// 阶段二（下半场）：数值 range / match
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 整数 range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u8_range__happy_inclusive_bounds_accepts_min_mid_max() {
+    let mut r_min = Reader::new(&[0x05]);
+    assert_eq!(expect::u8_range(&mut r_min, 5, 10), Some(5));
+    assert_eq!(r_min.error(), Error::Ok);
+    assert_eq!(r_min.used(), 1);
+
+    let mut r_mid = Reader::new(&[0x07]);
+    assert_eq!(expect::u8_range(&mut r_mid, 5, 10), Some(7));
+    assert_eq!(r_mid.error(), Error::Ok);
+    assert_eq!(r_mid.used(), 1);
+
+    let mut r_max = Reader::new(&[0x0A]);
+    assert_eq!(expect::u8_range(&mut r_max, 5, 10), Some(10));
+    assert_eq!(r_max.error(), Error::Ok);
+    assert_eq!(r_max.used(), 1);
+}
+
+#[test]
+fn u8_range__out_of_range_sets_type_error_after_consuming_value() {
+    let mut reader = Reader::new(&[0x0B]);
+    assert_eq!(expect::u8_range(&mut reader, 5, 10), None);
+    assert_eq!(reader.error(), Error::Type);
+    assert_eq!(reader.used(), 1);
+}
+
+#[test]
+fn u8_range__sticky_error_is_noop() {
+    let mut reader = Reader::new(&[0x07]);
+    reader.flag_error(Error::Invalid);
+    let used_before = reader.used();
+    assert_eq!(expect::u8_range(&mut reader, 5, 10), None);
+    assert_eq!(reader.error(), Error::Invalid);
+    assert_eq!(reader.used(), used_before);
+}
+
+#[test]
+fn u64_range__happy_accepts_wide_uint64_boundaries() {
+    let mut r_min = Reader::new(&[0xCF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]);
+    assert_eq!(expect::u64_range(&mut r_min, 256, 1024), Some(256));
+    assert_eq!(r_min.error(), Error::Ok);
+    assert_eq!(r_min.used(), 9);
+
+    let mut r_max = Reader::new(&[0xCD, 0x04, 0x00]);
+    assert_eq!(expect::u64_range(&mut r_max, 256, 1024), Some(1024));
+    assert_eq!(r_max.error(), Error::Ok);
+    assert_eq!(r_max.used(), 3);
+}
+
+#[test]
+fn u64_range__below_or_above_bounds_sets_type_error() {
+    let mut below = Reader::new(&[0xCC, 0x7F]);
+    assert_eq!(expect::u64_range(&mut below, 128, 255), None);
+    assert_eq!(below.error(), Error::Type);
+    assert_eq!(below.used(), 2);
+
+    let mut above = Reader::new(&[0xCD, 0x01, 0x00]);
+    assert_eq!(expect::u64_range(&mut above, 0, 255), None);
+    assert_eq!(above.error(), Error::Type);
+    assert_eq!(above.used(), 3);
+}
+
+#[test]
+fn i8_range__happy_inclusive_negative_and_positive_bounds() {
+    let mut r_min = Reader::new(&[0xFE]); // -2
+    assert_eq!(expect::i8_range(&mut r_min, -2, 2), Some(-2));
+    assert_eq!(r_min.error(), Error::Ok);
+    assert_eq!(r_min.used(), 1);
+
+    let mut r_mid = Reader::new(&[0x00]);
+    assert_eq!(expect::i8_range(&mut r_mid, -2, 2), Some(0));
+    assert_eq!(r_mid.error(), Error::Ok);
+    assert_eq!(r_mid.used(), 1);
+
+    let mut r_max = Reader::new(&[0x02]);
+    assert_eq!(expect::i8_range(&mut r_max, -2, 2), Some(2));
+    assert_eq!(r_max.error(), Error::Ok);
+    assert_eq!(r_max.used(), 1);
+}
+
+#[test]
+fn i8_range__out_of_range_sets_type_error() {
+    let mut low = Reader::new(&[0xFD]); // -3
+    assert_eq!(expect::i8_range(&mut low, -2, 2), None);
+    assert_eq!(low.error(), Error::Type);
+    assert_eq!(low.used(), 1);
+
+    let mut high = Reader::new(&[0x03]);
+    assert_eq!(expect::i8_range(&mut high, -2, 2), None);
+    assert_eq!(high.error(), Error::Type);
+    assert_eq!(high.used(), 1);
+}
+
+#[test]
+fn i64_range__happy_accepts_signed_boundaries() {
+    let mut r_min = Reader::new(&[0xD1, 0xFE, 0xD4]); // -300
+    assert_eq!(expect::i64_range(&mut r_min, -300, 300), Some(-300));
+    assert_eq!(r_min.error(), Error::Ok);
+    assert_eq!(r_min.used(), 3);
+
+    let mut r_max = Reader::new(&[0xCD, 0x01, 0x2C]); // 300
+    assert_eq!(expect::i64_range(&mut r_max, -300, 300), Some(300));
+    assert_eq!(r_max.error(), Error::Ok);
+    assert_eq!(r_max.used(), 3);
+}
+
+#[test]
+fn i64_range__out_of_range_and_sticky_error_behave_correctly() {
+    let mut out = Reader::new(&[0xCD, 0x01, 0x2D]); // 301
+    assert_eq!(expect::i64_range(&mut out, -300, 300), None);
+    assert_eq!(out.error(), Error::Type);
+    assert_eq!(out.used(), 3);
+
+    let mut sticky = Reader::new(&[0x00]);
+    sticky.flag_error(Error::Data);
+    let used_before = sticky.used();
+    assert_eq!(expect::i64_range(&mut sticky, -1, 1), None);
+    assert_eq!(sticky.error(), Error::Data);
+    assert_eq!(sticky.used(), used_before);
+}
+
+// ---------------------------------------------------------------------------
+// 浮点 range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_range__happy_accepts_integer_and_float_inputs_within_bounds() {
+    let bytes = f32_be(1.5);
+    let buf = [&[0xCA][..], &bytes[..]].concat();
+    let mut r_float = Reader::new(&buf);
+    assert_eq!(expect::float_range(&mut r_float, 1.0, 2.0), Some(1.5));
+    assert_eq!(r_float.error(), Error::Ok);
+    assert_eq!(r_float.used(), 5);
+
+    let mut r_int = Reader::new(&[0x02]);
+    assert_eq!(expect::float_range(&mut r_int, 1.0, 2.0), Some(2.0));
+    assert_eq!(r_int.error(), Error::Ok);
+    assert_eq!(r_int.used(), 1);
+}
+
+#[test]
+fn float_range__out_of_range_and_type_mismatch_set_type_error() {
+    let bytes = f32_be(2.5);
+    let buf = [&[0xCA][..], &bytes[..]].concat();
+    let mut out = Reader::new(&buf);
+    assert_eq!(expect::float_range(&mut out, 1.0, 2.0), None);
+    assert_eq!(out.error(), Error::Type);
+    assert_eq!(out.used(), 5);
+
+    let mut wrong = Reader::new(&[0xA0]);
+    assert_eq!(expect::float_range(&mut wrong, 1.0, 2.0), None);
+    assert_eq!(wrong.error(), Error::Type);
+    assert_eq!(wrong.used(), 1);
+}
+
+#[test]
+fn double_range__happy_accepts_f64_and_integer_inputs_within_bounds() {
+    let bytes = f64_be(1.25);
+    let buf = [&[0xCB][..], &bytes[..]].concat();
+    let mut r_double = Reader::new(&buf);
+    assert_eq!(expect::double_range(&mut r_double, 1.0, 2.0), Some(1.25));
+    assert_eq!(r_double.error(), Error::Ok);
+    assert_eq!(r_double.used(), 9);
+
+    let mut r_int = Reader::new(&[0x02]);
+    assert_eq!(expect::double_range(&mut r_int, 1.0, 2.0), Some(2.0));
+    assert_eq!(r_int.error(), Error::Ok);
+    assert_eq!(r_int.used(), 1);
+}
+
+#[test]
+fn double_range__out_of_range_and_sticky_error_behave_correctly() {
+    let bytes = f64_be(2.25);
+    let buf = [&[0xCB][..], &bytes[..]].concat();
+    let mut out = Reader::new(&buf);
+    assert_eq!(expect::double_range(&mut out, 1.0, 2.0), None);
+    assert_eq!(out.error(), Error::Type);
+    assert_eq!(out.used(), 9);
+
+    let mut sticky = Reader::new(&[0x01]);
+    sticky.flag_error(Error::Bug);
+    let used_before = sticky.used();
+    assert_eq!(expect::double_range(&mut sticky, 0.0, 2.0), None);
+    assert_eq!(sticky.error(), Error::Bug);
+    assert_eq!(sticky.used(), used_before);
+}
+
+// ---------------------------------------------------------------------------
+// 数值 match
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uint_match__happy_exact_match_accepts_and_consumes() {
+    let mut reader = Reader::new(&[0x2A]); // 42
+    assert!(expect::uint_match(&mut reader, 42));
+    assert_eq!(reader.error(), Error::Ok);
+    assert_eq!(reader.used(), 1);
+}
+
+#[test]
+fn uint_match__mismatch_sets_type_error_after_consuming() {
+    let mut reader = Reader::new(&[0x2B]); // 43
+    assert!(!expect::uint_match(&mut reader, 42));
+    assert_eq!(reader.error(), Error::Type);
+    assert_eq!(reader.used(), 1);
+}
+
+#[test]
+fn uint_match__negative_or_wrong_type_is_false_with_sticky_semantics() {
+    let mut negative = Reader::new(&[0xFF]); // -1
+    assert!(!expect::uint_match(&mut negative, 42));
+    assert_eq!(negative.error(), Error::Type);
+    assert_eq!(negative.used(), 1);
+
+    let mut sticky = Reader::new(&[0x2A]);
+    sticky.flag_error(Error::Invalid);
+    let used_before = sticky.used();
+    assert!(!expect::uint_match(&mut sticky, 42));
+    assert_eq!(sticky.error(), Error::Invalid);
+    assert_eq!(sticky.used(), used_before);
+}
+
+#[test]
+fn int_match__happy_exact_match_accepts_negative_and_positive() {
+    let mut neg = Reader::new(&[0xFF]); // -1
+    assert!(expect::int_match(&mut neg, -1));
+    assert_eq!(neg.error(), Error::Ok);
+    assert_eq!(neg.used(), 1);
+
+    let mut pos = Reader::new(&[0x2A]); // 42
+    assert!(expect::int_match(&mut pos, 42));
+    assert_eq!(pos.error(), Error::Ok);
+    assert_eq!(pos.used(), 1);
+}
+
+#[test]
+fn int_match__mismatch_and_type_mismatch_set_type_error() {
+    let mut mismatch = Reader::new(&[0x2A]); // 42
+    assert!(!expect::int_match(&mut mismatch, 41));
+    assert_eq!(mismatch.error(), Error::Type);
+    assert_eq!(mismatch.used(), 1);
+
+    let mut wrong_type = Reader::new(&[0xC2]); // false
+    assert!(!expect::int_match(&mut wrong_type, 0));
+    assert_eq!(wrong_type.error(), Error::Type);
+    assert_eq!(wrong_type.used(), 1);
+}
+
