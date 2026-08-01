@@ -19,7 +19,6 @@ Be defect-first: find real bugs, ABI breaks, and test-suite risks. Skip style ni
 ## Architecture checks
 
 - Dual-layer preserved: safe Rust core + `extern "C"` FFI; no “rewrite the C tests in Rust” shortcuts.
-- For **cJSON-style** ports: thin adapter outside frozen tree is OK; do not require editing frozen includes.
 - For **MPack-style** ports: prefer linking Rust instead of compiling `*.c`; flag unnecessary cJSON-like include-adapters.
 - Public headers remain the contract; Rust must match layout and calling convention.
 
