@@ -106,6 +106,11 @@ Everything-gate crash detection treats exit `< 0` or `>= 128` as failure
 expects GCC/MinGW (`CC=gcc`); the MSVC `cl` path does not force-include the
 soft-abort / quiet-printf adapters.
 
+`soft_abort.h` includes `<stdlib.h>` before `#define abort mpack_soft_abort`
+so libc's noreturn `abort` declaration is not rewritten onto
+`mpack_soft_abort` (which would omit call-site epilogues and trip stack
+canaries when the soft abort returns).
+
 `mpack_discard` under stubs forces `mpack_error_eof` even when init already set
 `mpack_error_unsupported`, so EOF-wait loops such as `test_file_read_eof` can
 terminate after soft-continued assertions.

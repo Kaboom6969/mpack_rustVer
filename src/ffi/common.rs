@@ -90,6 +90,9 @@ fn compare_signed(left: i64, right: i64) -> i32 {
 }
 
 /// Returns the upstream spelling of an error constant.
+///
+/// Unrecognized values assert under `full-suite-abi` (matches C `mpack_assert`
+/// in `mpack_error_to_string`), so `TEST_ASSERT(mpack_error_to_string(-1))` works.
 #[no_mangle]
 pub extern "C" fn mpack_error_to_string(error: c_int) -> *const c_char {
     match error {
@@ -103,11 +106,19 @@ pub extern "C" fn mpack_error_to_string(error: c_int) -> *const c_char {
         8 => c"mpack_error_bug".as_ptr(),
         9 => c"mpack_error_data".as_ptr(),
         10 => c"mpack_error_eof".as_ptr(),
-        _ => c"(unknown mpack_error_t)".as_ptr(),
+        _ => {
+            #[cfg(feature = "full-suite-abi")]
+            unsafe {
+                mpack_assert_fail(c"unrecognized error in mpack_error_to_string".as_ptr());
+            }
+            c"(unknown mpack_error_t)".as_ptr()
+        }
     }
 }
 
 /// Returns the upstream spelling of a tag type constant.
+///
+/// Unrecognized values assert under `full-suite-abi` (matches C `mpack_type_to_string`).
 #[no_mangle]
 pub extern "C" fn mpack_type_to_string(type_: c_int) -> *const c_char {
     match type_ {
@@ -124,7 +135,13 @@ pub extern "C" fn mpack_type_to_string(type_: c_int) -> *const c_char {
         TYPE_MAP => c"mpack_type_map".as_ptr(),
         #[cfg(feature = "full-suite-abi")]
         TYPE_EXT => c"mpack_type_ext".as_ptr(),
-        _ => c"(unknown mpack_type_t)".as_ptr(),
+        _ => {
+            #[cfg(feature = "full-suite-abi")]
+            unsafe {
+                mpack_assert_fail(c"unrecognized type in mpack_type_to_string".as_ptr());
+            }
+            c"(unknown mpack_type_t)".as_ptr()
+        }
     }
 }
 
