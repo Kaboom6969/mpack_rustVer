@@ -48,5 +48,9 @@ name = "full_abi_layout"
 path = "tests/port/full_abi_layout.rs"
 required-features = ["full-suite-abi"]
 
+[[test]]
+name = "expect_core"
+path = "tests/port/expect_core.rs"
+
 [build-dependencies]
 cc = { version = "1.4.0", optional = true }
