@@ -1,7 +1,8 @@
-//! Expect safe-core 原子测试：阶段一（nil、bool、true_、false_）
+//! Expect safe-core atomic tests: Phase 1 (nil, bool, true_, false_)
 //!
-//! 构造数据全部手写字节字面量，避免引入 writer 侧干扰。
-//! 命名格式：`{fn_name}__{scenario}` 便于 --test-threads=1 时按前缀筛选。
+//! All fixtures are hand-written byte literals to avoid writer-side coupling.
+//! Naming uses `{fn_name}__{scenario}` so tests can be filtered by prefix under
+//! `--test-threads=1`.
 #![allow(non_snake_case)]
 
 use mpack::common::Error;
@@ -39,7 +40,7 @@ fn nil__wrong_type_sets_type_error_and_returns_false() {
 
 #[test]
 fn nil__sticky_error_is_noop_and_consumes_zero() {
-    // 先把 reader 放进 sticky Invalid 状态，然后给一个合法 nil
+    // Put the reader into sticky Invalid state first, then present a valid nil.
     let mut reader = Reader::new(&[0xc0, 0xc0]);
     reader.flag_error(Error::Invalid);
     let snapshot_used = reader.used();
@@ -63,14 +64,15 @@ fn nil__sticky_error_is_noop_and_consumes_zero() {
 
 #[test]
 fn nil__eof_without_data_silently_returns_false_and_flags_invalid() {
-    // 空切片 — read_tag 无字节可读
+    // Empty slice: read_tag has no bytes available.
     let mut reader = Reader::new(&[]);
     assert!(
         !expect::nil(&mut reader),
         "EOF must return false without panicking"
     );
-    // Reader::parse_tag 对无 marker 情况当前会设 Error::Invalid；
-    // safe-core 不改动 reader 公共面，这里只断言「不是 Ok + 没消费」
+    // Reader::parse_tag currently sets Error::Invalid when no marker exists.
+    // Safe-core does not change the reader public surface, so we only assert
+    // "not Ok + nothing consumed" here.
     assert_ne!(reader.error(), Error::Ok, "truncated data must set an error");
     assert_eq!(reader.used(), 0);
 }
@@ -94,7 +96,7 @@ fn bool__reads_true_and_false() {
 
 #[test]
 fn bool__non_bool_marker_sets_type_error_and_returns_none() {
-    // 0x00 = fixuint 0, 0xa0 = fixstr empty, 0xc0 = nil — 三者全不是 bool
+    // 0x00 = fixuint 0, 0xa0 = empty fixstr, 0xc0 = nil — none are bool.
     for bad in [[0x00_u8; 1], [0xa0; 1], [0xc0; 1]] {
         let mut reader = Reader::new(&bad);
         assert_eq!(
@@ -137,7 +139,7 @@ fn true___exact_true_accepts() {
 
 #[test]
 fn true___false_value_is_type_mismatch() {
-    // 0xc2 = valid bool, 但期望 true → false
+    // 0xc2 = valid bool, but we expect true, so this is a mismatch.
     let mut reader = Reader::new(&[0xc2]);
     assert!(!expect::true_(&mut reader));
     assert_eq!(reader.error(), Error::Type);
@@ -162,8 +164,9 @@ fn false___true_value_is_type_mismatch() {
 
 #[test]
 fn true_and_false__non_bool_marker_returns_false_and_sets_type_error() {
-    // 0x01 = uint 1. 即使逻辑值为 "truthy" 也必须是 TypeError，
-    // 这是 C 原版 (expect.c:327-342) 明确写的行为
+    // 0x01 = uint 1. Even though it is logically "truthy", this must still
+    // be TypeError. The original C implementation (expect.c:327-342) makes
+    // that behavior explicit.
     let mut r_t = Reader::new(&[0x01]);
     assert!(!expect::true_(&mut r_t));
     assert_eq!(r_t.error(), Error::Type, "truthy uint must NOT coerce to true()");
@@ -191,10 +194,11 @@ fn true_and_false__sticky_error_noop() {
 }
 
 // ===========================================================================
-// 阶段二：基础数值读取 (u8, u64, i8, i64, f32, f64)
+// Phase 2: basic numeric reads (u8, u64, i8, i64, f32, f64)
 //
-// 字节编码完全手写字面量，0 耦合 writer 模块。MessagePack 编码速查：
-//   fixint 0..127          : 0x00..0x7F          (1B, Tag::Uint 或兼容 Tag::Int>=0)
+// Byte encodings are all hand-written literals with zero writer coupling.
+// MessagePack encoding cheat sheet:
+//   fixint 0..127          : 0x00..0x7F          (1B, Tag::Uint or compatible Tag::Int>=0)
 //   fixint -32..-1         : 0xE0..0xFF          (1B, Tag::Int)
 //   uint8                  : 0xCC + u8           (2B)
 //   uint16                 : 0xCD + u16 BE       (3B)
@@ -206,11 +210,11 @@ fn true_and_false__sticky_error_noop() {
 //   int64                  : 0xD3 + i64 BE       (9B)
 //   float32                : 0xCA + f32 IEEE BE  (5B)
 //   float64                : 0xCB + f64 IEEE BE  (9B)
-//   fixstr(0) / fixarr(0)  : 0xA0 / 0x90         (1B marker, 无 payload)
+//   fixstr(0) / fixarr(0)  : 0xA0 / 0x90         (1B marker, no payload)
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// mpack_expect_u8 (expect::u8) — 无符号 8 位
+// mpack_expect_u8 (expect::u8) — unsigned 8-bit
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -227,7 +231,7 @@ fn u8__happy_fixint_and_uint8_max() {
     assert_eq!(r2.error(), Error::Ok);
     assert_eq!(r2.used(), 2);
 
-    // uint8 边界: u8::MAX = 255 (0xCC 0xFF)
+    // uint8 boundary: u8::MAX = 255 (0xCC 0xFF)
     let mut r3 = Reader::new(&[0xCC, 0xFF]);
     assert_eq!(expect::u8(&mut r3), Some(255));
     assert_eq!(r3.error(), Error::Ok);
@@ -236,7 +240,7 @@ fn u8__happy_fixint_and_uint8_max() {
 
 #[test]
 fn u8__out_of_bounds_uint16_256_sets_type_error() {
-    // 用户明确指出的用例：uint16 256 = 0xCD 0x01 0x00 → expect_u8 必须失败
+    // Explicitly requested case: uint16 256 = 0xCD 0x01 0x00 -> expect_u8 must fail.
     let mut reader = Reader::new(&[0xCD, 0x01, 0x00]);
     assert_eq!(expect::u8(&mut reader), None, "256 must NOT fit in u8");
     assert_eq!(
@@ -244,19 +248,21 @@ fn u8__out_of_bounds_uint16_256_sets_type_error() {
         Error::Type,
         "OOB integer -> Error::Type (not Ok / not silent truncate)"
     );
-    // 仍然消费了 marker + 2B payload = 3B（类型 header 已被 reader.read_tag() 消费）
+    // Marker + 2B payload are still consumed = 3B total; the type header was
+    // already consumed by reader.read_tag().
     assert_eq!(reader.used(), 3);
 }
 
 #[test]
 fn u8__sign_mismatch_negative_int_sets_type_error() {
-    // int8 -1 = 0xD0 0xFF；无符号读负数必须 TypeError，不得 silent truncate 到 255
+    // int8 -1 = 0xD0 0xFF; unsigned reads of negatives must be TypeError, not
+    // silently truncated to 255.
     let mut reader = Reader::new(&[0xD0, 0xFF]);
     assert_eq!(expect::u8(&mut reader), None, "negative -1 must NOT fit in u8");
     assert_eq!(reader.error(), Error::Type);
     assert_eq!(reader.used(), 2);
 
-    // negative fixint -32 = 0xE0（1B）也必须 Type
+    // negative fixint -32 = 0xE0 (1B) must also raise Type.
     let mut r2 = Reader::new(&[0xE0]);
     assert_eq!(expect::u8(&mut r2), None);
     assert_eq!(r2.error(), Error::Type);
@@ -265,13 +271,13 @@ fn u8__sign_mismatch_negative_int_sets_type_error() {
 
 #[test]
 fn u8__type_mismatch_non_numeric_marker_sets_type_error() {
-    // fixstr 空 = 0xA0
+    // empty fixstr = 0xA0
     let mut r_str = Reader::new(&[0xA0]);
     assert_eq!(expect::u8(&mut r_str), None);
     assert_eq!(r_str.error(), Error::Type);
     assert_eq!(r_str.used(), 1);
 
-    // fixarr 空 = 0x90
+    // empty fixarr = 0x90
     let mut r_arr = Reader::new(&[0x90]);
     assert_eq!(expect::u8(&mut r_arr), None);
     assert_eq!(r_arr.error(), Error::Type);
@@ -286,7 +292,7 @@ fn u8__type_mismatch_non_numeric_marker_sets_type_error() {
 
 #[test]
 fn u8__sticky_error_returns_none_zero_consumed_preserves_error() {
-    // 放进 Error::Data 状态，然后给合法 uint8=9
+    // Enter Error::Data state first, then present valid uint8=9.
     let mut reader = Reader::new(&[0x09]);
     reader.flag_error(Error::Data);
     let used_before = reader.used();
@@ -297,12 +303,12 @@ fn u8__sticky_error_returns_none_zero_consumed_preserves_error() {
 }
 
 // ---------------------------------------------------------------------------
-// mpack_expect_u64 (expect::u64) — 无符号 64 位（另一极值代表）
+// mpack_expect_u64 (expect::u64) — unsigned 64-bit (the other extreme-width representative)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn u64__happy_fixint_uint32_uint64_max() {
-    // fixint 0 = 0x00（最小 Uint）
+    // fixint 0 = 0x00 (smallest uint)
     let mut r0 = Reader::new(&[0x00]);
     assert_eq!(expect::u64(&mut r0), Some(0));
     assert_eq!(r0.error(), Error::Ok);
@@ -314,7 +320,7 @@ fn u64__happy_fixint_uint32_uint64_max() {
     assert_eq!(r32.error(), Error::Ok);
     assert_eq!(r32.used(), 5);
 
-    // uint64 MAX = 0xCF 0xFF..(8 个) = u64::MAX
+    // uint64 MAX = 0xCF 0xFF..(8 bytes) = u64::MAX
     let mut r_max = Reader::new(&[
         0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     ]);
@@ -325,7 +331,8 @@ fn u64__happy_fixint_uint32_uint64_max() {
 
 #[test]
 fn u64__sign_mismatch_negative_int_sets_type_error() {
-    // int64 -1 = 0xD3 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF；u64 必须拒绝（不能转成 u64::MAX）
+    // int64 -1 = 0xD3 0xFF..; u64 must reject this and must not coerce it to
+    // u64::MAX.
     let mut reader = Reader::new(&[
         0xD3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     ]);
@@ -333,7 +340,7 @@ fn u64__sign_mismatch_negative_int_sets_type_error() {
     assert_eq!(reader.error(), Error::Type);
     assert_eq!(reader.used(), 9);
 
-    // negative fixint -1 = 0xFF（1 字节）也必须 Type
+    // negative fixint -1 = 0xFF (1 byte) must also raise Type.
     let mut r2 = Reader::new(&[0xFF]);
     assert_eq!(expect::u64(&mut r2), None);
     assert_eq!(r2.error(), Error::Type);
@@ -342,14 +349,15 @@ fn u64__sign_mismatch_negative_int_sets_type_error() {
 
 #[test]
 fn u64__out_of_bounds_non_integer_marker_sets_type_error() {
-    // u64 是最大整数位宽，不存在 "u64 以上的整数编码"，所以 OOB 这里等价于非整数 marker
+    // u64 is the widest integer type, so there is no integer encoding above
+    // u64. Here, out-of-bounds is effectively equivalent to a non-integer tag.
     // bool true = 0xC3
     let mut r_bool = Reader::new(&[0xC3]);
     assert_eq!(expect::u64(&mut r_bool), None);
     assert_eq!(r_bool.error(), Error::Type);
     assert_eq!(r_bool.used(), 1);
 
-    // f32 marker = 0xCA + 4B（具体数值 1.0 随意）
+    // f32 marker = 0xCA + 4B (the concrete value 1.0 here is arbitrary)
     let mut r_f = Reader::new(&[0xCA, 0x3F, 0x80, 0x00, 0x00]);
     assert_eq!(expect::u64(&mut r_f), None, "u64 must NOT accept float32 tag even when numeric");
     assert_eq!(r_f.error(), Error::Type);
@@ -382,7 +390,7 @@ fn u64__sticky_error_returns_none_and_no_advance() {
 }
 
 // ---------------------------------------------------------------------------
-// mpack_expect_i8 (expect::i8) — 有符号 8 位
+// mpack_expect_i8 (expect::i8) — signed 8-bit
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -393,13 +401,13 @@ fn i8__happy_positive_fixint_and_neg_int8_boundary() {
     assert_eq!(r0.error(), Error::Ok);
     assert_eq!(r0.used(), 1);
 
-    // int8 -128 = 0xD0 0x80（i8::MIN，边界内）
+    // int8 -128 = 0xD0 0x80 (i8::MIN, in range)
     let mut r_min = Reader::new(&[0xD0, 0x80]);
     assert_eq!(expect::i8(&mut r_min), Some(i8::MIN));
     assert_eq!(r_min.error(), Error::Ok);
     assert_eq!(r_min.used(), 2);
 
-    // int8 127 = 0xD0 0x7F（i8::MAX，边界内）
+    // int8 127 = 0xD0 0x7F (i8::MAX, in range)
     let mut r_max = Reader::new(&[0xD0, 0x7F]);
     assert_eq!(expect::i8(&mut r_max), Some(i8::MAX));
     assert_eq!(r_max.error(), Error::Ok);
@@ -414,13 +422,13 @@ fn i8__happy_positive_fixint_and_neg_int8_boundary() {
 
 #[test]
 fn i8__out_of_bounds_int16_200_sets_type_error() {
-    // int16 200 = 0xD1 0x00 0xC8。200 > i8::MAX(127)，必须 TypeError
+    // int16 200 = 0xD1 0x00 0xC8. Since 200 > i8::MAX(127), this must be TypeError.
     let mut reader = Reader::new(&[0xD1, 0x00, 0xC8]);
     assert_eq!(expect::i8(&mut reader), None);
     assert_eq!(reader.error(), Error::Type, "200 > i8::MAX must fail");
     assert_eq!(reader.used(), 3);
 
-    // int16 -200 = 0xD1 0xFF 0x38。-200 < i8::MIN(-128)，也必须 Type
+    // int16 -200 = 0xD1 0xFF 0x38. Since -200 < i8::MIN(-128), this must also be Type.
     let mut r2 = Reader::new(&[0xD1, 0xFF, 0x38]);
     assert_eq!(expect::i8(&mut r2), None);
     assert_eq!(r2.error(), Error::Type, "-200 < i8::MIN must fail");
@@ -429,10 +437,12 @@ fn i8__out_of_bounds_int16_200_sets_type_error() {
 
 #[test]
 fn i8__sign_mismatch_uint_exceeding_i64_range_fails_for_any_width() {
-    // 用 uint16 300 = 0xCD 0x01 0x2C：300 作为 i64 TryFrom 能过（300 <= i64::MAX），
-    // 但 300 > i8::MAX(127)，结果是 TypeError — 这是 OOB。真正的 sign-mismatch 对 i8
-    // 是那种「根本过不了 i64 TryFrom」的 uint 即 uint > i64::MAX。
-    // 这里用一个 uint8 255（255 <= i64::MAX 能过 TryFrom）但 255 > i8::MAX → TypeError。
+    // Use uint16 300 = 0xCD 0x01 0x2C: it passes i64::try_from because
+    // 300 <= i64::MAX, but 300 > i8::MAX(127), so the result is TypeError.
+    // That is an out-of-bounds case. A true sign/range mismatch for i8 would
+    // be a uint that cannot even pass i64::try_from, i.e. uint > i64::MAX.
+    // Here we use uint8 255: it passes TryFrom into i64, but 255 > i8::MAX,
+    // so it must still be TypeError.
     let mut r_oob = Reader::new(&[0xCC, 0xFF]); // uint8 255
     assert_eq!(expect::i8(&mut r_oob), None, "255 > i8::MAX must fail");
     assert_eq!(r_oob.error(), Error::Type);
@@ -465,7 +475,7 @@ fn i8__sticky_error_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// mpack_expect_i64 (expect::i64) — 有符号 64 位（另一极值代表）
+// mpack_expect_i64 (expect::i64) — signed 64-bit (the other extreme-width representative)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -493,7 +503,8 @@ fn i64__happy_positive_negative_and_uint_within_i64_range() {
     assert_eq!(r_max.used(), 9);
 
     // uint32 500_000_000 = 0xCE 0x1D 0xCD 0x65 0x00
-    // 该值 <= i64::MAX → 允许（C 原版 i64 接受 uint 范围内的编码）
+    // This value is <= i64::MAX, so it is accepted. The original C i64 expect
+    // accepts uint encodings when they fit in range.
     let mut r_u32 = Reader::new(&[0xCE, 0x1D, 0xCD, 0x65, 0x00]);
     assert_eq!(expect::i64(&mut r_u32), Some(500_000_000));
     assert_eq!(r_u32.error(), Error::Ok);
@@ -503,8 +514,9 @@ fn i64__happy_positive_negative_and_uint_within_i64_range() {
 #[test]
 fn i64__out_of_bounds_uint_exceeding_i64_max_sets_type_error() {
     // uint64 = i64::MAX as u64 + 1 = 0x8000000000000000
-    // 这个值 i64::try_from 失败 → TypeError（真正的 i64 整数符号/范围错配）
-    let big = u64::MAX - (i64::MAX as u64); // 实际我们直接写 i64::MAX+1 的字面量字节
+    // This value fails i64::try_from -> TypeError, which is the real i64
+    // integer sign/range mismatch case.
+    let big = u64::MAX - (i64::MAX as u64); // We directly encode the literal bytes for i64::MAX + 1 below.
     let _ = big;
     let mut reader = Reader::new(&[
         0xCF, // uint64 marker
@@ -521,8 +533,8 @@ fn i64__out_of_bounds_uint_exceeding_i64_max_sets_type_error() {
 
 #[test]
 fn i64__sign_mismatch_negative_uint_oob_vs_negative_int() {
-    // negative int 对 i64 本身 OK（不是 sign-mismatch，因为 i64 支持负）。
-    // 这里测一个非数值 marker：fixstr(0) 0xA0，确保 TypeError
+    // Negative ints are valid for i64, so they are not a sign mismatch here.
+    // This instead uses a non-numeric marker, fixstr(0) = 0xA0, to confirm TypeError.
     let mut r_str = Reader::new(&[0xA0]);
     assert_eq!(expect::i64(&mut r_str), None);
     assert_eq!(r_str.error(), Error::Type);
@@ -531,7 +543,7 @@ fn i64__sign_mismatch_negative_uint_oob_vs_negative_int() {
 
 #[test]
 fn i64__type_mismatch_float32_marker_sets_type_error() {
-    // f32 1.0 = 0xCA 0x3F800000；i64（strict）不接受 float，必须 Type
+    // f32 1.0 = 0xCA 0x3F800000; strict i64 does not accept floats, so this must be Type.
     let mut reader = Reader::new(&[0xCA, 0x3F, 0x80, 0x00, 0x00]);
     assert_eq!(
         expect::i64(&mut reader),
@@ -553,10 +565,10 @@ fn i64__sticky_error_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// mpack_expect_float (expect::float) — f32 lax 版（可拓宽/接受整数，按 C 原版 lax）
+// mpack_expect_float (expect::float) — lax f32 (can widen/accept integers, matching the original C behavior)
 // ---------------------------------------------------------------------------
 
-/// Helper: f32 -> BE bytes (pure const math，不引 writer)
+/// Helper: f32 -> BE bytes (pure const math, no writer dependency)
 const fn f32_be(v: f32) -> [u8; 4] {
     let bits = v.to_bits();
     [
@@ -595,7 +607,7 @@ fn float__happy_lax_widens_f64_to_f32() {
 
 #[test]
 fn float__happy_lax_accepts_integer_uint8_and_fixint() {
-    // C 原版 lax `expect_float` 接受整数编码（自动 cast）
+    // The original C lax `expect_float` accepts integer encodings via cast.
     // uint8 200 = 0xCC 0xC8 → 200.0f32
     let mut r_u = Reader::new(&[0xCC, 0xC8]);
     assert_eq!(expect::float(&mut r_u), Some(200.0f32));
@@ -611,7 +623,8 @@ fn float__happy_lax_accepts_integer_uint8_and_fixint() {
 
 #[test]
 fn float__out_of_bounds_non_numeric_marker_is_type_error() {
-    // f32 的 OOB（lax 数值范围放宽到 f32 无限可表示；对整数 cast 也无硬性截断 → 这里测类型）
+    // For lax f32, numeric range is broad enough that we use this test to
+    // validate type mismatch behavior instead of numeric overflow.
     // nil = 0xC0
     let mut r_nil = Reader::new(&[0xC0]);
     assert_eq!(expect::float(&mut r_nil), None);
@@ -627,7 +640,8 @@ fn float__out_of_bounds_non_numeric_marker_is_type_error() {
 
 #[test]
 fn float__sign_mismatch_negative_floats_still_read_as_lax() {
-    // float 的 sign mismatch 不存在（浮点自然支持负）；这里用 bool true 代替非数值 marker
+    // Float has no sign-mismatch case in this sense because floats naturally
+    // support negatives; use bool true here as a non-numeric marker instead.
     let mut r_bool = Reader::new(&[0xC3]);
     assert_eq!(expect::float(&mut r_bool), None);
     assert_eq!(r_bool.error(), Error::Type);
@@ -655,7 +669,7 @@ fn float__sticky_error_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// mpack_expect_double (expect::double) — f64 lax 版
+// mpack_expect_double (expect::double) — lax f64
 // ---------------------------------------------------------------------------
 
 const fn f64_be(v: f64) -> [u8; 8] {
@@ -683,8 +697,9 @@ fn double__happy_reads_f64_and_widens_f32() {
     assert_eq!(r64.error(), Error::Ok);
     assert_eq!(r64.used(), 9);
 
-    // f32 1.0 = 0xCA 0x3F800000 → 拓宽到 1.0f64（lax 规则）；
-    // C 原版 expect.c:200-210 double 接受 Tag::Float。当前 Rust 实现也接受。
+    // f32 1.0 = 0xCA 0x3F800000 -> widened to 1.0f64 by the lax rule.
+    // The original C expect.c:200-210 accepts Tag::Float for double, and the
+    // current Rust implementation does as well.
     let bytes32 = f32_be(1.0);
     let buf32 = [&[0xCA][..], &bytes32[..]].concat();
     let mut r32 = Reader::new(&buf32);
@@ -696,13 +711,13 @@ fn double__happy_reads_f64_and_widens_f32() {
 
 #[test]
 fn double__happy_lax_accepts_integer_encodings() {
-    // int32 -1,000,000 = 0xD2 0xFF 0xF0 0xBD 0xC0（十进制 -1000000）
+    // int32 -1,000,000 = 0xD2 0xFF 0xF0 0xBD 0xC0 (decimal -1000000)
     let mut reader = Reader::new(&[0xD2, 0xFF, 0xF0, 0xBD, 0xC0]);
     assert_eq!(expect::double(&mut reader), Some(-1_000_000.0f64));
     assert_eq!(reader.error(), Error::Ok);
     assert_eq!(reader.used(), 5);
 
-    // uint64 (小值) fixint 42 = 0x2A
+    // small uint value encoded as fixint 42 = 0x2A
     let mut r2 = Reader::new(&[0x2A]);
     assert_eq!(expect::double(&mut r2), Some(42.0f64));
     assert_eq!(r2.error(), Error::Ok);
@@ -750,11 +765,11 @@ fn double__sticky_error_noop() {
 }
 
 // ===========================================================================
-// 阶段二（下半场）：数值 range / match
+// Phase 2 (second half): numeric range / match
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// 整数 range
+// Integer range
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -879,7 +894,7 @@ fn i64_range__out_of_range_and_sticky_error_behave_correctly() {
 }
 
 // ---------------------------------------------------------------------------
-// 浮点 range
+// Floating-point range
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -945,7 +960,7 @@ fn double_range__out_of_range_and_sticky_error_behave_correctly() {
 }
 
 // ---------------------------------------------------------------------------
-// 数值 match
+// Numeric match
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1006,7 +1021,7 @@ fn int_match__mismatch_and_type_mismatch_set_type_error() {
 }
 
 // ===========================================================================
-// 阶段三：字符串 / 缓冲区 / bin / ext
+// Phase 3: string / buffer / bin / ext
 // ===========================================================================
 
 #[test]
