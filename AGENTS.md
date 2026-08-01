@@ -36,3 +36,7 @@ pass via a C-ABI FFI layer lives under `tests/original/` (do not edit it; see
   tests go in `tests/port/` only (never edit the frozen suite in `tests/original/`).
 - The FFI layer must match the MPack C ABI so the frozen C suite links unchanged;
   see `.cursor/rules/mpack-architecture.mdc` and `mpack-parity.mdc`.
+- Parallel lanes and **per-module frozen-suite gates** are in
+  `.cursor/rules/team-ownership.mdc` (also mirrored under `.trae/rules/`).
+  A lane is done only when its matching `test-*.c` has 0 failures under the
+  documented `frozen-link` command—not from `tests/port/` alone.
