@@ -267,11 +267,17 @@ impl<'data> Reader<'data> {
 
     /// Reads `length` payload bytes and requires well-formed UTF-8.
     pub fn read_bytes_utf8(&mut self, length: usize) -> Option<&'data [u8]> {
-        let bytes = self.read_bytes(length)?;
+        if self.error != Error::Ok || !self.require(length) {
+            return None;
+        }
+        let start = self.position;
+        let end = start + length;
+        let bytes = &self.data[start..end];
         if !check_utf8(bytes) {
             self.flag_error(Error::Type);
             return None;
         }
+        self.position = end;
         Some(bytes)
     }
 
