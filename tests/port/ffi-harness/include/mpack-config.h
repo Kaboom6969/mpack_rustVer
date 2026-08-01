@@ -5,6 +5,7 @@
  * Lock the C harness to the upstream embed-writer variant. These values are
  * explicit because they define the mpack_writer_t layout mirrored by Rust.
  */
+#define MPACK_UNIT_TESTS 1
 #define MPACK_VARIANT_BUILDS 1
 #define MPACK_READER 0
 #define MPACK_EXPECT 0
@@ -20,6 +21,10 @@
 
 #ifdef MPACK_MALLOC
 #error "embed-writer harness must not define MPACK_MALLOC"
+#endif
+
+#ifdef MPACK_FROZEN_TESTS
+#include "test-system.h"
 #endif
 
 #endif
