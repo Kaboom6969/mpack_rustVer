@@ -11,8 +11,18 @@ readme = "README.md"
 name = "mpack"
 crate-type = ["rlib", "cdylib"]
 
+[features]
+ffi-harness = ["dep:cc"]
+
 [dependencies]
 
 [[test]]
 name = "smoke"
 path = "tests/port/smoke.rs"
+
+[[test]]
+name = "writer_core"
+path = "tests/port/writer_core.rs"
+
+[build-dependencies]
+cc = { version = "1.4.0", optional = true }
