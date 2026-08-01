@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build frozen MPack C tests against the Rust cdylib without altering them."""
+"""Build frozen MPack C tests against the Rust library without altering them."""
 
 from __future__ import annotations
 
@@ -21,10 +21,25 @@ FROZEN_UNIT = ROOT / "tests" / "original" / "test" / "unit"
 EMBED_CONFIG_INCLUDE = ROOT / "tests" / "port" / "ffi-harness" / "include"
 BUILD = ROOT / "target" / "frozen-link"
 
+# Matches original_c configure.py `everything` (+ debug): allfeatures + allconfigs.
+EVERYTHING_DEFINES = [
+    "MPACK_VARIANT_BUILDS=1",
+    "MPACK_READER=1",
+    "MPACK_WRITER=1",
+    "MPACK_EXPECT=1",
+    "MPACK_NODE=1",
+    "MPACK_COMPATIBILITY=1",
+    "MPACK_EXTENSIONS=1",
+    "MPACK_STDLIB=1",
+    "MPACK_MALLOC=test_malloc",
+    "MPACK_FREE=test_free",
+    "MPACK_STDIO=1",
+]
 
-def run(command: list[str]) -> None:
+
+def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print("+", " ".join(map(str, command)))
-    subprocess.run(command, cwd=ROOT, check=True)
+    subprocess.run(command, cwd=ROOT, check=True, env=env)
 
 
 def rust_output(release: bool) -> Path:
@@ -49,6 +64,33 @@ def cdylib_import_library(output: Path) -> Path:
     raise FileNotFoundError("Cargo did not produce a linkable mpack cdylib import library.")
 
 
+def static_library(output: Path) -> Path:
+    candidates = (output / name for name in ("libmpack.a", "mpack.lib"))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("Cargo did not produce a linkable mpack static library.")
+
+
+def native_static_libs() -> list[str]:
+    """System libraries required when linking a Rust staticlib from C."""
+    target = RUST_TARGET or ("x86_64-pc-windows-gnu" if os.name == "nt" else "")
+    if "windows-gnu" in target or (os.name == "nt" and not target):
+        return [
+            "-lkernel32",
+            "-lntdll",
+            "-luserenv",
+            "-lws2_32",
+            "-ldbghelp",
+            "-lgcc_eh",
+            "-lpthread",
+            "-luser32",
+        ]
+    if "apple" in target or sys.platform == "darwin":
+        return ["-framework", "Security", "-lSystem"]
+    return ["-ldl", "-lpthread", "-lm"]
+
+
 def c_command(
     source_files: list[Path],
     output: Path,
@@ -57,10 +99,18 @@ def c_command(
     config_include: Path,
     debug: bool,
     wrap_abort: bool = False,
+    extra_defines: list[str] | None = None,
+    link_static: bool = False,
 ) -> list[str]:
-    compiler = os.environ.get("CC") or shutil.which("cc") or shutil.which("clang")
+    compiler = os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
     if compiler is None:
         compiler = "cl" if os.name == "nt" else "gcc"
+
+    defines = ["MPACK_HAS_CONFIG=1", "MPACK_FROZEN_TESTS=1"]
+    if extra_defines:
+        defines.extend(extra_defines)
+    if debug:
+        defines.append("DEBUG")
 
     if Path(compiler).name.lower() in {"cl", "cl.exe"}:
         command = [
@@ -68,8 +118,7 @@ def c_command(
             "/nologo",
             "/std:c11",
             "/Zi",
-            "/DMPACK_HAS_CONFIG=1",
-            "/DMPACK_FROZEN_TESTS=1",
+            *[f"/D{define}" for define in defines],
             f"/I{config_include}",
             f"/I{UPSTREAM_INCLUDE}",
             f"/I{FROZEN_UNIT / 'src'}",
@@ -77,16 +126,13 @@ def c_command(
             str(library),
             f"/Fe:{output}",
         ]
-        if debug:
-            command.insert(3, "/DDEBUG")
         return command
 
     command = [
         compiler,
         "-std=c11",
         "-g",
-        "-DMPACK_HAS_CONFIG=1",
-        "-DMPACK_FROZEN_TESTS=1",
+        *[f"-D{define}" for define in defines],
         f"-I{config_include}",
         f"-I{UPSTREAM_INCLUDE}",
         f"-I{FROZEN_UNIT / 'src'}",
@@ -94,18 +140,39 @@ def c_command(
         str(library),
         "-o",
         str(output),
-        "-Wl,-rpath," + str(library.parent),
     ]
-    if debug:
-        command.insert(3, "-DDEBUG")
     if wrap_abort:
         # Redirect abort() to a returning function so TEST_EARLY_EXIT fall-through
         # remains defined under GCC's noreturn assumptions for libc abort.
-        command.insert(
-            3,
-            f"-include{Path(__file__).resolve().parent / 'c' / 'soft_abort.h'}",
-        )
+        # Also quiet printf spam from soft-continued assertion loops.
+        adapter_c = Path(__file__).resolve().parent / "c"
+        command.insert(3, f"-include{adapter_c / 'soft_abort.h'}")
+        command.insert(4, f"-include{adapter_c / 'quiet_printf.h'}")
+    if not link_static:
+        command.append("-Wl,-rpath," + str(library.parent))
+    else:
+        # Header inlines from mpack-platform.c and Rust #[no_mangle] exports can
+        # overlap; keep the C definitions (sources precede the archive).
+        command.extend(["-Wl,--allow-multiple-definition"])
+        command.extend(native_static_libs())
     return command
+
+
+def prepare_full_suite_extras(sources: list[Path]) -> None:
+    sources.append(Path(__file__).parent / "c" / "full_layout_check.c")
+    sources.append(Path(__file__).parent / "c" / "soft_abort.c")
+    sources.append(Path(__file__).parent / "c" / "quiet_printf.c")
+    ctor = BUILD / "full_layout_ctor.c"
+    ctor.write_text(
+        "int mpack_full_layout_check(void);\n"
+        "static void __attribute__((constructor)) mpack_run_layout_check(void) {\n"
+        "    int failures = mpack_full_layout_check();\n"
+        "    if (failures != 0) {\n"
+        "        __builtin_trap();\n"
+        "    }\n"
+        "}\n"
+    )
+    sources.append(ctor)
 
 
 def main() -> int:
@@ -121,9 +188,14 @@ def main() -> int:
         help="treat the current full-suite unresolved-symbol result as a successful checkpoint",
     )
     parser.add_argument(
+        "--everything",
+        action="store_true",
+        help="C everything config (reader/expect/node/stdio/compat/extensions) with full-suite-abi stubs",
+    )
+    parser.add_argument(
         "--default-config",
         action="store_true",
-        help="use tests/original default config and build Rust with full-suite-abi stubs",
+        help="alias for --everything (kept for older docs/scripts)",
     )
     parser.add_argument(
         "--release", action="store_true", help="build the Rust library in release mode"
@@ -132,33 +204,55 @@ def main() -> int:
 
     if args.expect_missing and not args.full:
         parser.error("--expect-missing requires --full")
-    if args.default_config and not args.full:
-        parser.error("--default-config requires --full")
+    if args.everything and args.default_config:
+        parser.error("use only one of --everything / --default-config")
+    full_suite = args.everything or args.default_config
+    if full_suite and not args.full:
+        parser.error("--everything / --default-config requires --full")
 
-    cargo_command = ["cargo", "build"]
-    if RUST_TARGET:
-        cargo_command.extend(["--target", RUST_TARGET])
-    if args.release:
-        cargo_command.append("--release")
-    if args.default_config:
-        cargo_command.extend(["--features", "full-suite-abi"])
+    if full_suite:
+        # Build only the staticlib: a Windows cdylib cannot leave suite symbols
+        # (test_malloc / mpack_assert_fail) undefined, but those must come from
+        # the frozen C objects at final exe link.
+        cargo_command = ["cargo", "rustc"]
+        if RUST_TARGET:
+            cargo_command.extend(["--target", RUST_TARGET])
+        if args.release:
+            cargo_command.append("--release")
+        cargo_command.extend(["--features", "full-suite-abi", "--crate-type", "staticlib"])
+    else:
+        cargo_command = ["cargo", "build"]
+        if RUST_TARGET:
+            cargo_command.extend(["--target", RUST_TARGET])
+        if args.release:
+            cargo_command.append("--release")
     run(cargo_command)
     BUILD.mkdir(parents=True, exist_ok=True)
     output = rust_output(args.release)
-    library = cdylib_import_library(output)
-    runtime_library = output / "mpack.dll"
-    if runtime_library.exists():
-        shutil.copy2(runtime_library, BUILD)
+
+    # Full-suite modes link the staticlib so suite-provided symbols (test_malloc,
+    # mpack_assert_fail) resolve at final exe link. Embed-writer keeps cdylib.
+    if full_suite:
+        library = static_library(output)
+        link_static = True
+    else:
+        library = cdylib_import_library(output)
+        link_static = False
+        runtime_library = output / "mpack.dll"
+        if runtime_library.exists():
+            shutil.copy2(runtime_library, BUILD)
 
     profile = "release" if args.release else "debug"
-    if args.default_config:
+    if full_suite:
         config_include = FROZEN_UNIT / "src"
-        config_name = "default"
+        config_name = "everything"
         debug = True
+        extra_defines = EVERYTHING_DEFINES
     else:
         config_include = EMBED_CONFIG_INCLUDE
         config_name = "embed-writer"
         debug = False
+        extra_defines = None
 
     if args.full:
         sources = sorted((FROZEN_UNIT / "src").glob("*.c"))
@@ -168,24 +262,27 @@ def main() -> int:
         executable = BUILD / f"{config_name}-{profile}-nil-smoke"
     sources.append(ROOT / "original_c" / "mpack-develop" / "src" / "mpack" / "mpack-platform.c")
 
-    if args.default_config:
-        sources.append(Path(__file__).parent / "c" / "full_layout_check.c")
-        sources.append(Path(__file__).parent / "c" / "soft_abort.c")
-        sources.append(Path(__file__).parent / "c" / "quiet_printf.c")
-        # Provide a tiny main wrapper that runs layout check then the suite main.
-        # The frozen suite already has main(); call the layout check from a ctor.
-        ctor = BUILD / "full_layout_ctor.c"
-        ctor.write_text(
-            "int mpack_full_layout_check(void);\n"
-            "static void __attribute__((constructor)) mpack_run_layout_check(void) {\n"
-            "    int failures = mpack_full_layout_check();\n"
-            "    if (failures != 0) {\n"
-            "        __builtin_trap();\n"
-            "    }\n"
-            "}\n"
-        )
-        sources.append(ctor)
+    if full_suite:
+        prepare_full_suite_extras(sources)
 
+    print(
+        "+",
+        " ".join(
+            map(
+                str,
+                c_command(
+                    sources,
+                    executable,
+                    library,
+                    config_include=config_include,
+                    debug=debug,
+                    wrap_abort=full_suite,
+                    extra_defines=extra_defines,
+                    link_static=link_static,
+                ),
+            )
+        ),
+    )
     result = subprocess.run(
         c_command(
             sources,
@@ -193,7 +290,9 @@ def main() -> int:
             library,
             config_include=config_include,
             debug=debug,
-            wrap_abort=args.default_config,
+            wrap_abort=full_suite,
+            extra_defines=extra_defines,
+            link_static=link_static,
         ),
         cwd=ROOT,
     )
@@ -207,19 +306,19 @@ def main() -> int:
         return result.returncode
 
     if args.full:
-        # Default-config stubs are expected to fail many assertions; success means
+        # Full-suite stubs are expected to fail many assertions; success means
         # the binary linked and ran to completion (printed the failure summary).
         completed = subprocess.run([str(executable)], cwd=ROOT)
-        if args.default_config:
+        if full_suite:
             # Python reports fatal signals as 128+N on Linux.
             if completed.returncode < 0 or completed.returncode >= 128:
                 print(
-                    "Default-config frozen suite crashed "
+                    "Everything frozen suite crashed "
                     f"(exit={completed.returncode}); treating as failure."
                 )
                 return 1
             print(
-                "Default-config frozen suite finished "
+                "Everything frozen suite finished "
                 f"(exit={completed.returncode}; assertion failures expected with stubs)."
             )
             return 0

@@ -1,6 +1,6 @@
 /*
- * Full-suite ABI layout probe. Compiled against tests/original mpack-config.h.
- * Linked from the frozen-link default-config gate.
+ * Full-suite ABI layout probe. Compiled against tests/original mpack-config.h
+ * with C everything feature macros. Linked from the frozen-link --everything gate.
  */
 #include <stddef.h>
 #include <stdio.h>
