@@ -1,6 +1,7 @@
 param(
     [switch]$Full,
     [switch]$ExpectMissing,
+    [switch]$Everything,
     [switch]$DefaultConfig,
     [switch]$Release
 )
@@ -10,8 +11,12 @@ $ErrorActionPreference = "Stop"
 if ($ExpectMissing -and -not $Full) {
     throw "-ExpectMissing requires -Full."
 }
-if ($DefaultConfig -and -not $Full) {
-    throw "-DefaultConfig requires -Full."
+if ($Everything -and $DefaultConfig) {
+    throw "Use only one of -Everything / -DefaultConfig."
+}
+$FullSuite = $Everything -or $DefaultConfig
+if ($FullSuite -and -not $Full) {
+    throw "-Everything / -DefaultConfig requires -Full."
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -24,6 +29,21 @@ $RustTarget = if ($env:MPACK_RUST_TARGET) { $env:MPACK_RUST_TARGET } else { "x86
 $Cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 $Compiler = if ($env:CC) { $env:CC } else { "C:\Strawberry\c\bin\gcc.exe" }
 
+# Matches original_c configure.py `everything` (+ debug).
+$EverythingDefines = @(
+    "MPACK_VARIANT_BUILDS=1",
+    "MPACK_READER=1",
+    "MPACK_WRITER=1",
+    "MPACK_EXPECT=1",
+    "MPACK_NODE=1",
+    "MPACK_COMPATIBILITY=1",
+    "MPACK_EXTENSIONS=1",
+    "MPACK_STDLIB=1",
+    "MPACK_MALLOC=test_malloc",
+    "MPACK_FREE=test_free",
+    "MPACK_STDIO=1"
+)
+
 if (-not (Test-Path $Cargo)) {
     throw "Cargo was not found at $Cargo. Set up Cargo or update this adapter."
 }
@@ -31,12 +51,18 @@ if (-not (Get-Command $Compiler -ErrorAction SilentlyContinue) -and -not (Test-P
     throw "C compiler '$Compiler' was not found. Set CC to a GCC-compatible compiler."
 }
 
-$CargoArguments = @("build", "--target", $RustTarget)
-if ($Release) {
-    $CargoArguments += "--release"
-}
-if ($DefaultConfig) {
-    $CargoArguments += @("--features", "full-suite-abi")
+if ($FullSuite) {
+    # staticlib only: Windows cdylib cannot leave suite symbols undefined.
+    $CargoArguments = @("rustc", "--target", $RustTarget)
+    if ($Release) {
+        $CargoArguments += "--release"
+    }
+    $CargoArguments += @("--features", "full-suite-abi", "--crate-type", "staticlib")
+} else {
+    $CargoArguments = @("build", "--target", $RustTarget)
+    if ($Release) {
+        $CargoArguments += "--release"
+    }
 }
 & $Cargo @CargoArguments
 if ($LASTEXITCODE -ne 0) {
@@ -46,27 +72,40 @@ if ($LASTEXITCODE -ne 0) {
 New-Item -ItemType Directory -Force -Path $Build | Out-Null
 $Profile = if ($Release) { "release" } else { "debug" }
 $RustOutput = Join-Path $CargoTarget "$RustTarget\$Profile"
-$Library = @(
-    (Join-Path $RustOutput "libmpack.dll.a"),
-    (Join-Path $RustOutput "mpack.lib"),
-    (Join-Path $RustOutput "mpack.dll.lib")
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $Library) {
-    throw "Cargo did not produce a linkable mpack cdylib import library."
-}
-$RuntimeLibrary = Join-Path $RustOutput "mpack.dll"
-if (Test-Path $RuntimeLibrary) {
-    Copy-Item -Force $RuntimeLibrary $Build
+
+if ($FullSuite) {
+    $Library = @(
+        (Join-Path $RustOutput "libmpack.a"),
+        (Join-Path $RustOutput "mpack.lib")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $Library) {
+        throw "Cargo did not produce a linkable mpack static library."
+    }
+} else {
+    $Library = @(
+        (Join-Path $RustOutput "libmpack.dll.a"),
+        (Join-Path $RustOutput "mpack.lib"),
+        (Join-Path $RustOutput "mpack.dll.lib")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $Library) {
+        throw "Cargo did not produce a linkable mpack cdylib import library."
+    }
+    $RuntimeLibrary = Join-Path $RustOutput "mpack.dll"
+    if (Test-Path $RuntimeLibrary) {
+        Copy-Item -Force $RuntimeLibrary $Build
+    }
 }
 
-if ($DefaultConfig) {
+if ($FullSuite) {
     $ConfigInclude = Join-Path $FrozenUnit "src"
-    $ConfigName = "default"
+    $ConfigName = "everything"
     $DebugDefine = @("-DDEBUG")
+    $ExtraDefines = $EverythingDefines | ForEach-Object { "-D$_" }
 } else {
     $ConfigInclude = $EmbedConfigInclude
     $ConfigName = "embed-writer"
     $DebugDefine = @()
+    $ExtraDefines = @()
 }
 
 if ($Full) {
@@ -78,8 +117,10 @@ if ($Full) {
 }
 $Sources += Join-Path $Root "original_c\mpack-develop\src\mpack\mpack-platform.c"
 
-if ($DefaultConfig) {
+if ($FullSuite) {
     $Sources += Join-Path $PSScriptRoot "c\full_layout_check.c"
+    $Sources += Join-Path $PSScriptRoot "c\soft_abort.c"
+    $Sources += Join-Path $PSScriptRoot "c\quiet_printf.c"
     $Ctor = Join-Path $Build "full_layout_ctor.c"
     @"
 int mpack_full_layout_check(void);
@@ -93,16 +134,41 @@ static void __attribute__((constructor)) mpack_run_layout_check(void) {
     $Sources += $Ctor
 }
 
+$NativeStaticLibs = @()
+if ($FullSuite) {
+    $NativeStaticLibs = @(
+        "-lkernel32",
+        "-lntdll",
+        "-luserenv",
+        "-lws2_32",
+        "-ldbghelp",
+        "-lgcc_eh",
+        "-lpthread",
+        "-luser32"
+    )
+}
+
 $Arguments = @(
     "-std=c11",
     "-g"
-) + $DebugDefine + @(
+) + $DebugDefine + $ExtraDefines + @(
     "-DMPACK_HAS_CONFIG=1",
     "-DMPACK_FROZEN_TESTS=1",
     "-I$ConfigInclude",
     "-I$UpstreamInclude",
     "-I$(Join-Path $FrozenUnit 'src')"
-) + $Sources + @($Library, "-o", $Output)
+)
+if ($FullSuite) {
+    $Arguments += @(
+        "-include$(Join-Path $PSScriptRoot 'c\soft_abort.h')",
+        "-include$(Join-Path $PSScriptRoot 'c\quiet_printf.h')"
+    )
+}
+$Arguments += $Sources + @($Library) + $NativeStaticLibs
+if ($FullSuite) {
+    $Arguments += "-Wl,--allow-multiple-definition"
+}
+$Arguments += @("-o", $Output)
 
 & $Compiler @Arguments
 if ($LASTEXITCODE -ne 0) {
@@ -115,12 +181,12 @@ if ($LASTEXITCODE -ne 0) {
 
 & $Output
 $SuiteExit = $LASTEXITCODE
-if ($DefaultConfig) {
+if ($FullSuite) {
     if ($SuiteExit -lt 0) {
-        Write-Host "Default-config frozen suite aborted (signal); treating as failure."
+        Write-Host "Everything frozen suite aborted (signal); treating as failure."
         exit 1
     }
-    Write-Host "Default-config frozen suite finished (exit=$SuiteExit; assertion failures expected with stubs)."
+    Write-Host "Everything frozen suite finished (exit=$SuiteExit; assertion failures expected with stubs)."
     exit 0
 }
 exit $SuiteExit
