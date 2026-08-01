@@ -5,7 +5,7 @@
 //! `--test-threads=1`.
 #![allow(non_snake_case)]
 
-use mpack::common::Error;
+use mpack::common::{Error, Tag, Timestamp};
 use mpack::expect;
 use mpack::reader::Reader;
 
@@ -1385,5 +1385,76 @@ fn map_and_array_max_or_nil__max_bound_and_sticky_error() {
     assert_eq!(expect::array_or_nil(&mut sticky_array), None);
     assert_eq!(sticky_array.error(), Error::Data);
     assert_eq!(sticky_array.used(), used_before);
+}
+
+#[test]
+fn timestamp_and_tag__consume_expected_headers_and_report_type_mismatch() {
+    let mut ts = Reader::new(&[0xD6, 0xFF, 0, 0, 0, 42]);
+    assert_eq!(
+        expect::timestamp(&mut ts),
+        Some(Timestamp {
+            seconds: 42,
+            nanoseconds: 0,
+        })
+    );
+    assert_eq!(ts.error(), Error::Ok);
+    assert_eq!(ts.used(), 6);
+
+    let mut trunc = Reader::new(&[0xD6, 0xFF, 0, 0, 0, 7]);
+    assert_eq!(expect::timestamp_truncate(&mut trunc), Some(7));
+    assert_eq!(trunc.error(), Error::Ok);
+    assert_eq!(trunc.used(), 6);
+
+    let mut wrong = Reader::new(&[0xD6, 0x05, 0, 0, 0, 42]);
+    assert_eq!(expect::timestamp(&mut wrong), None);
+    assert_eq!(wrong.error(), Error::Type);
+    assert_eq!(wrong.used(), 2);
+
+    let mut tag_ok = Reader::new(&[0x93]);
+    assert!(expect::tag(&mut tag_ok, Tag::Array(3)));
+    let mut tag_bad = Reader::new(&[0x92]);
+    assert!(!expect::tag(&mut tag_bad, Tag::Array(3)));
+    assert_eq!(tag_bad.error(), Error::Type);
+}
+
+#[test]
+fn key_uint_and_key_cstr__discard_unknown_and_reject_duplicates_like_c() {
+    let mut found = [false; 2];
+    let mut uint_unknown = Reader::new(&[0x02, 0xC3]);
+    assert_eq!(expect::key_uint(&mut uint_unknown, &mut found), Some(2));
+    assert_eq!(uint_unknown.error(), Error::Ok);
+    assert_eq!(uint_unknown.used(), 1);
+    assert_eq!(expect::r#bool(&mut uint_unknown), Some(true));
+    assert_eq!(found, [false, false]);
+
+    let mut uint_non_uint = Reader::new(&[0xA1, b'x', 0xC3]);
+    assert_eq!(expect::key_uint(&mut uint_non_uint, &mut found), Some(2));
+    assert_eq!(uint_non_uint.error(), Error::Ok);
+    assert_eq!(uint_non_uint.used(), 2);
+    assert_eq!(expect::r#bool(&mut uint_non_uint), Some(true));
+
+    let mut uint_dup_found = [true, false];
+    let mut uint_dup = Reader::new(&[0x00]);
+    assert_eq!(expect::key_uint(&mut uint_dup, &mut uint_dup_found), None);
+    assert_eq!(uint_dup.error(), Error::Invalid);
+
+    let keys = ["id", "name"];
+    let mut cstr_found = [false; 2];
+    let mut cstr_unknown = Reader::new(&[0xA3, b'a', b'g', b'e', 0xC3]);
+    assert_eq!(expect::key_cstr(&mut cstr_unknown, &keys, &mut cstr_found), Some(2));
+    assert_eq!(cstr_unknown.error(), Error::Ok);
+    assert_eq!(cstr_unknown.used(), 4);
+    assert_eq!(expect::r#bool(&mut cstr_unknown), Some(true));
+
+    let mut cstr_non_str = Reader::new(&[0x01, 0xC3]);
+    assert_eq!(expect::key_cstr(&mut cstr_non_str, &keys, &mut cstr_found), Some(2));
+    assert_eq!(cstr_non_str.error(), Error::Ok);
+    assert_eq!(cstr_non_str.used(), 1);
+    assert_eq!(expect::r#bool(&mut cstr_non_str), Some(true));
+
+    let mut cstr_dup_found = [false, true];
+    let mut cstr_dup = Reader::new(&[0xA4, b'n', b'a', b'm', b'e']);
+    assert_eq!(expect::key_cstr(&mut cstr_dup, &keys, &mut cstr_dup_found), None);
+    assert_eq!(cstr_dup.error(), Error::Invalid);
 }
 
