@@ -102,7 +102,12 @@ impl<'data> Reader<'data> {
             self.flag_error(Error::Invalid);
             return None;
         }
-        let bytes = self.read_bytes(size)?;
+        if !self.require(size) {
+            return None;
+        }
+        let start = self.position;
+        let end = start + size;
+        let bytes = &self.data[start..end];
         let timestamp = match size {
             4 => Timestamp {
                 seconds: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
@@ -130,6 +135,7 @@ impl<'data> Reader<'data> {
             self.flag_error(Error::Invalid);
             return None;
         }
+        self.position = end;
         Some(timestamp)
     }
 
@@ -267,11 +273,17 @@ impl<'data> Reader<'data> {
 
     /// Reads `length` payload bytes and requires well-formed UTF-8.
     pub fn read_bytes_utf8(&mut self, length: usize) -> Option<&'data [u8]> {
-        let bytes = self.read_bytes(length)?;
+        if self.error != Error::Ok || !self.require(length) {
+            return None;
+        }
+        let start = self.position;
+        let end = start + length;
+        let bytes = &self.data[start..end];
         if !check_utf8(bytes) {
             self.flag_error(Error::Type);
             return None;
         }
+        self.position = end;
         Some(bytes)
     }
 

@@ -141,3 +141,15 @@ teammate safe-core work and later FFI wrapping:
   and `expect::r#str` (still the locked names for C `mpack_expect_bool` /
   `mpack_expect_str`). `true_` / `false_` avoid the `true` / `false` keywords.
 
+### Reader cursor atomicity on validation failure
+
+The safe-core Reader treats UTF-8 validation failures (`read_bytes_utf8`) and
+timestamp validation failures (`read_timestamp`) as atomic with respect to the
+input cursor: on failure, the reader flags a sticky error and does not advance
+`Reader::used()`.
+
+This may diverge from the C reader's cursor semantics for the same failure
+conditions. If strict C parity is required at the ABI boundary, the FFI layer
+may need to emulate C cursor consumption behavior while still mapping to the
+safe-core Reader helpers.
+
