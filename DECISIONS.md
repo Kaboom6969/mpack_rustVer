@@ -73,3 +73,31 @@ header-inline ABI definitions, then links the frozen test objects to the Rust
 `cdylib`. It does not compile any C encoder, decoder, expect, or node source.
 This adapter is necessary because C11 header inlines such as
 `mpack_writer_error()` require one external definition in debug builds.
+
+### Full-suite ABI stubs
+
+The `full-suite-abi` Cargo feature switches `#[repr(C)]` layouts to the upstream
+default unit-test configuration (compatibility, extensions, malloc reserve,
+builder, and read/write tracking). Under this feature, missing reader, expect,
+node, track, and print exports are thin stubs that set sticky
+`mpack_error_unsupported` and return zero/nil/`NULL`.
+
+Stubs are temporary scaffolding for the
+`python3 tests/port/frozen-link/run.py --full --default-config` feedback loop.
+They do not change the final unsafe budget: each export remains a required C
+ABI entry, safe encode/decode stays in `forbid(unsafe_code)` modules, and stub
+bodies are replaced with safe-core calls rather than grown in place.
+
+The default-config adapter force-includes a soft `abort` redirect so the frozen
+suite's hardcoded `TEST_EARLY_EXIT` does not stop the process before printing
+the failure summary. It also links a quiet `printf` override so soft-continued
+assertion spam does not dominate runtime. Both are scaffolding-only and are not
+used by the embed-writer gate.
+
+`mpack_discard` under stubs forces `mpack_error_eof` even when init already set
+`mpack_error_unsupported`, so EOF-wait loops such as `test_file_read_eof` can
+terminate after soft-continued assertions.
+
+The default (feature-off) build keeps the embed-writer ABI used by the existing
+green frozen-link gate. A single cdylib cannot satisfy both layouts at once.
+

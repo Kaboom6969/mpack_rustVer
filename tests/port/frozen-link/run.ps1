@@ -1,6 +1,7 @@
 param(
     [switch]$Full,
     [switch]$ExpectMissing,
+    [switch]$DefaultConfig,
     [switch]$Release
 )
 
@@ -9,11 +10,14 @@ $ErrorActionPreference = "Stop"
 if ($ExpectMissing -and -not $Full) {
     throw "-ExpectMissing requires -Full."
 }
+if ($DefaultConfig -and -not $Full) {
+    throw "-DefaultConfig requires -Full."
+}
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $UpstreamInclude = Join-Path $Root "original_c\mpack-develop\src"
 $FrozenUnit = Join-Path $Root "tests\original\test\unit"
-$ConfigInclude = Join-Path $Root "tests\port\ffi-harness\include"
+$EmbedConfigInclude = Join-Path $Root "tests\port\ffi-harness\include"
 $Build = Join-Path $Root "target\frozen-link"
 $CargoTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root "target" }
 $RustTarget = if ($env:MPACK_RUST_TARGET) { $env:MPACK_RUST_TARGET } else { "x86_64-pc-windows-gnu" }
@@ -30,6 +34,9 @@ if (-not (Get-Command $Compiler -ErrorAction SilentlyContinue) -and -not (Test-P
 $CargoArguments = @("build", "--target", $RustTarget)
 if ($Release) {
     $CargoArguments += "--release"
+}
+if ($DefaultConfig) {
+    $CargoArguments += @("--features", "full-suite-abi")
 }
 & $Cargo @CargoArguments
 if ($LASTEXITCODE -ne 0) {
@@ -52,18 +59,44 @@ if (Test-Path $RuntimeLibrary) {
     Copy-Item -Force $RuntimeLibrary $Build
 }
 
+if ($DefaultConfig) {
+    $ConfigInclude = Join-Path $FrozenUnit "src"
+    $ConfigName = "default"
+    $DebugDefine = @("-DDEBUG")
+} else {
+    $ConfigInclude = $EmbedConfigInclude
+    $ConfigName = "embed-writer"
+    $DebugDefine = @()
+}
+
 if ($Full) {
     $Sources = Get-ChildItem (Join-Path $FrozenUnit "src") -Filter "*.c" | Sort-Object Name | ForEach-Object FullName
-    $Output = Join-Path $Build "embed-writer-$Profile-frozen.exe"
+    $Output = Join-Path $Build "$ConfigName-$Profile-frozen.exe"
 } else {
     $Sources = @(Join-Path $PSScriptRoot "c\frozen_nil_smoke.c")
-    $Output = Join-Path $Build "embed-writer-$Profile-nil-smoke.exe"
+    $Output = Join-Path $Build "$ConfigName-$Profile-nil-smoke.exe"
 }
 $Sources += Join-Path $Root "original_c\mpack-develop\src\mpack\mpack-platform.c"
 
+if ($DefaultConfig) {
+    $Sources += Join-Path $PSScriptRoot "c\full_layout_check.c"
+    $Ctor = Join-Path $Build "full_layout_ctor.c"
+    @"
+int mpack_full_layout_check(void);
+static void __attribute__((constructor)) mpack_run_layout_check(void) {
+    int failures = mpack_full_layout_check();
+    if (failures != 0) {
+        __builtin_trap();
+    }
+}
+"@ | Set-Content -Path $Ctor -Encoding Ascii
+    $Sources += $Ctor
+}
+
 $Arguments = @(
     "-std=c11",
-    "-g",
+    "-g"
+) + $DebugDefine + @(
     "-DMPACK_HAS_CONFIG=1",
     "-DMPACK_FROZEN_TESTS=1",
     "-I$ConfigInclude",
@@ -81,4 +114,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $Output
-exit $LASTEXITCODE
+$SuiteExit = $LASTEXITCODE
+if ($DefaultConfig) {
+    if ($SuiteExit -lt 0) {
+        Write-Host "Default-config frozen suite aborted (signal); treating as failure."
+        exit 1
+    }
+    Write-Host "Default-config frozen suite finished (exit=$SuiteExit; assertion failures expected with stubs)."
+    exit 0
+}
+exit $SuiteExit

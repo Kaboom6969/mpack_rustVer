@@ -12,7 +12,11 @@ name = "mpack"
 crate-type = ["rlib", "cdylib"]
 
 [features]
+default = []
 ffi-harness = ["dep:cc"]
+# Full frozen-suite ABI (COMPATIBILITY/EXTENSIONS/tracking/builder/reader/node).
+# Mutually exclusive at the layout level with the default embed-writer ABI.
+full-suite-abi = []
 
 [dependencies]
 
@@ -31,6 +35,11 @@ path = "tests/port/writer_configs.rs"
 [[test]]
 name = "reader_core"
 path = "tests/port/reader_core.rs"
+
+[[test]]
+name = "full_abi_layout"
+path = "tests/port/full_abi_layout.rs"
+required-features = ["full-suite-abi"]
 
 [build-dependencies]
 cc = { version = "1.4.0", optional = true }
