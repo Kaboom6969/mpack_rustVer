@@ -1,0 +1,18 @@
+[package]
+name = "mpack"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of MPack (MessagePack C library) for Port Mortem 2026"
+license = "MIT"
+repository = "https://github.com/Kaboom6969/mpack_rustVer"
+readme = "README.md"
+
+[lib]
+name = "mpack"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+
+[[test]]
+name = "smoke"
+path = "tests/port/smoke.rs"
