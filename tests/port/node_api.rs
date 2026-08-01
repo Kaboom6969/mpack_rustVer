@@ -4,14 +4,22 @@ use mpack::common::{Error, Tag, Type};
 use mpack::node::Tree;
 
 #[test]
-fn locked_parse_stub_is_unsupported_until_implemented() {
+fn parse_nil_is_ok_and_has_root() {
     let tree = Tree::parse(&[0xc0]);
-    assert_eq!(tree.error(), Error::Unsupported);
-    assert!(tree.root().is_none());
+    assert_eq!(tree.error(), Error::Ok);
+    let root = tree.root().expect("root");
+    assert_eq!(root.type_(), Type::Nil);
 }
 
 #[test]
-#[ignore = "Teammate A: implement Node safe-core (see DECISIONS.md Node freeze)"]
+fn parse_allows_trailing_bytes() {
+    let tree = Tree::parse(&[0xc0, 0xff]);
+    assert_eq!(tree.error(), Error::Ok);
+    let root = tree.root().expect("root");
+    assert_eq!(root.type_(), Type::Nil);
+}
+
+#[test]
 fn parse_scalars_array_map_and_lookups() {
     let data = [
         0x82, // map 2
@@ -37,7 +45,6 @@ fn parse_scalars_array_map_and_lookups() {
 }
 
 #[test]
-#[ignore = "Teammate A: implement Node safe-core (see DECISIONS.md Node freeze)"]
 fn map_uint_and_bin_ext_surface() {
     let data = [0x81, 0x07, 0xc4, 2, b'h', b'i'];
     let tree = Tree::parse(&data);
@@ -52,7 +59,6 @@ fn map_uint_and_bin_ext_surface() {
 }
 
 #[test]
-#[ignore = "Teammate A: implement Node safe-core (see DECISIONS.md Node freeze)"]
 fn type_mismatch_is_sticky_on_tree() {
     let tree = Tree::parse(&[0xc0]); // nil
     let root = tree.root().expect("root");
