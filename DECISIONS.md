@@ -118,6 +118,40 @@ terminate after soft-continued assertions.
 The default (feature-off) build keeps the embed-writer ABI used by the existing
 green frozen-link gate. A single library build cannot satisfy both layouts at once.
 
+### Safe-core API freeze (Node, minimal)
+
+Public items in `src/node.rs` are a **minimal** frozen contract for teammate
+tree/DOM work and later FFI wrapping. Signature or public type changes require
+lead approval.
+
+**Bodies are intentional stubs** (`Tree::parse` starts as `Error::Unsupported`,
+accessors no-op / flag unsupported). Teammate A owns filling implementations
+until `tests/port/node_api.rs` acceptance tests (currently `#[ignore]`) pass.
+
+Locked surface:
+
+- `Tree<'data>::parse(&[u8])`, `error`, `flag_error`, `root`
+- `Node<'tree, 'data>`: `tag`, `type_`, `is_nil`, `as_bool`, `as_u64`, `as_i64`,
+  `as_f32`, `as_f64`, `str_bytes`, `bin_bytes`, `ext`, `array_len`, `array_at`,
+  `map_count`, `map_key_at`, `map_value_at`, `map_uint`, `map_str`
+- Sticky errors use `common::Error` on the tree. `Node` accessors may flag
+  errors through `&Tree` (`Cell<Error>`), matching C `mpack_node_*` behavior.
+- Payload views are `&[u8]` borrowed from the input slice (no allocator-owned
+  returns). `type_` avoids the `type` keyword.
+- Out of safe-core scope (FFI / lead): stream/file/stdfile init, C node pools,
+  `*_alloc`, `copy_*` into C `char*`, print-to-file, and optional/contains/
+  enum helpers beyond this minimal list.
+- Teammates may fill bodies and add `tests/port/node_*.rs` only; do not grow
+  the public surface without lead approval. When acceptance tests pass, remove
+  their `#[ignore]` attributes.
+
+Intentional minimal divergences vs full C `mpack-node` (once implemented):
+
+- `as_f32` accepts only `Tag::Float` (no integer/double widen yet).
+- Required map lookups (`map_uint` / `map_str`) flag `Error::Data` when missing;
+  optional/contains variants are not locked yet.
+- Duplicate map keys are not diagnosed in this freeze.
+
 ### Safe-core API freeze (Reader + Expect)
 
 Public items in `src/reader.rs` and `src/expect.rs` are a frozen contract for
