@@ -19,8 +19,18 @@ fn type_error<T>(reader: &mut Reader<'_>) -> Option<T> {
     None
 }
 
+fn too_big<T>(reader: &mut Reader<'_>) -> Option<T> {
+    reader.flag_error(Error::TooBig);
+    None
+}
+
 fn fail_bool(reader: &mut Reader<'_>) -> bool {
     reader.flag_error(Error::Type);
+    false
+}
+
+fn fail_too_big(reader: &mut Reader<'_>) -> bool {
+    reader.flag_error(Error::TooBig);
     false
 }
 
@@ -356,14 +366,20 @@ fn copy_cstr(dst: &mut [u8], src: &[u8]) -> bool {
 
 pub fn str_buf(reader: &mut Reader<'_>, buf: &mut [u8]) -> Option<usize> {
     let length = r#str(reader)? as usize;
+    if length > buf.len() {
+        return too_big(reader);
+    }
     let bytes = reader.read_bytes(length)?;
-    copy_bytes(buf, bytes).or_else(|| type_error(reader))
+    copy_bytes(buf, bytes)
 }
 
 pub fn utf8(reader: &mut Reader<'_>, buf: &mut [u8]) -> Option<usize> {
     let length = r#str(reader)? as usize;
+    if length > buf.len() {
+        return too_big(reader);
+    }
     let bytes = reader.read_bytes_utf8(length)?;
-    copy_bytes(buf, bytes).or_else(|| type_error(reader))
+    copy_bytes(buf, bytes)
 }
 
 pub fn str_match(reader: &mut Reader<'_>, expected: &[u8]) -> bool {
@@ -381,28 +397,54 @@ pub fn str_match(reader: &mut Reader<'_>, expected: &[u8]) -> bool {
 }
 
 pub fn cstr(reader: &mut Reader<'_>, buf: &mut [u8]) -> bool {
+    if buf.is_empty() {
+        reader.flag_error(Error::Bug);
+        return false;
+    }
     let Some(length) = r#str(reader) else {
+        buf[0] = 0;
         return false;
     };
-    let Some(bytes) = reader.read_bytes(length as usize) else {
+    let length = length as usize;
+    if length + 1 > buf.len() {
+        buf[0] = 0;
+        return fail_too_big(reader);
+    }
+    let Some(bytes) = reader.read_bytes(length) else {
+        buf[0] = 0;
         return false;
     };
-    if bytes.contains(&0) || !copy_cstr(buf, bytes) {
+    if bytes.contains(&0) {
+        buf[0] = 0;
         return fail_bool(reader);
     }
+    let _ = copy_cstr(buf, bytes);
     true
 }
 
 pub fn utf8_cstr(reader: &mut Reader<'_>, buf: &mut [u8]) -> bool {
+    if buf.is_empty() {
+        reader.flag_error(Error::Bug);
+        return false;
+    }
     let Some(length) = r#str(reader) else {
+        buf[0] = 0;
         return false;
     };
-    let Some(bytes) = reader.read_bytes(length as usize) else {
+    let length = length as usize;
+    if length + 1 > buf.len() {
+        buf[0] = 0;
+        return fail_too_big(reader);
+    }
+    let Some(bytes) = reader.read_bytes(length) else {
+        buf[0] = 0;
         return false;
     };
-    if !reader::check_utf8_no_null(bytes) || !copy_cstr(buf, bytes) {
+    if !reader::check_utf8_no_null(bytes) {
+        buf[0] = 0;
         return fail_bool(reader);
     }
+    let _ = copy_cstr(buf, bytes);
     true
 }
 
@@ -415,8 +457,11 @@ pub fn bin(reader: &mut Reader<'_>) -> Option<u32> {
 
 pub fn bin_buf(reader: &mut Reader<'_>, buf: &mut [u8]) -> Option<usize> {
     let length = bin(reader)? as usize;
+    if length > buf.len() {
+        return too_big(reader);
+    }
     let bytes = reader.read_bytes(length)?;
-    copy_bytes(buf, bytes).or_else(|| type_error(reader))
+    copy_bytes(buf, bytes)
 }
 
 pub fn bin_size_buf(reader: &mut Reader<'_>, buf: &mut [u8], size: u32) -> bool {
@@ -443,8 +488,11 @@ pub fn ext(reader: &mut Reader<'_>) -> Option<(i8, u32)> {
 
 pub fn ext_buf(reader: &mut Reader<'_>, buf: &mut [u8]) -> Option<(i8, usize)> {
     let (ext_type, length) = ext(reader)?;
+    if length as usize > buf.len() {
+        return too_big(reader);
+    }
     let bytes = reader.read_bytes(length as usize)?;
-    let written = copy_bytes(buf, bytes).or_else(|| type_error(reader))?;
+    let written = copy_bytes(buf, bytes)?;
     Some((ext_type, written))
 }
 

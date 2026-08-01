@@ -1005,3 +1005,193 @@ fn int_match__mismatch_and_type_mismatch_set_type_error() {
     assert_eq!(wrong_type.used(), 1);
 }
 
+// ===========================================================================
+// 阶段三：字符串 / 缓冲区 / bin / ext
+// ===========================================================================
+
+#[test]
+fn str__happy_reads_fixstr_and_str8_headers() {
+    let mut fix = Reader::new(&[0xA3, b'a', b'b', b'c']);
+    assert_eq!(expect::r#str(&mut fix), Some(3));
+    assert_eq!(fix.error(), Error::Ok);
+    assert_eq!(fix.used(), 1);
+
+    let mut str8 = Reader::new(&[0xD9, 0x04, b't', b'e', b's', b't']);
+    assert_eq!(expect::r#str(&mut str8), Some(4));
+    assert_eq!(str8.error(), Error::Ok);
+    assert_eq!(str8.used(), 2);
+}
+
+#[test]
+fn str_buf__happy_copies_bytes_and_zero_length() {
+    let mut buf = [0xAA; 4];
+    let mut reader = Reader::new(&[0xA3, b'a', b'b', b'c']);
+    assert_eq!(expect::str_buf(&mut reader, &mut buf), Some(3));
+    assert_eq!(&buf[..3], b"abc");
+    assert_eq!(reader.error(), Error::Ok);
+    assert_eq!(reader.used(), 4);
+
+    let mut empty = [0xAA; 1];
+    let mut empty_reader = Reader::new(&[0xA0]);
+    assert_eq!(expect::str_buf(&mut empty_reader, &mut empty), Some(0));
+    assert_eq!(empty_reader.error(), Error::Ok);
+    assert_eq!(empty_reader.used(), 1);
+}
+
+#[test]
+fn str_buf__too_small_sets_toobig_and_leaves_payload_unread() {
+    let mut buf = [0u8; 2];
+    let mut reader = Reader::new(&[0xD9, 0x03, b'a', b'b', b'c']);
+    assert_eq!(expect::str_buf(&mut reader, &mut buf), None);
+    assert_eq!(reader.error(), Error::TooBig);
+    assert_eq!(reader.used(), 2);
+    assert_eq!(reader.remaining(), 3);
+}
+
+#[test]
+fn utf8__happy_valid_and_invalid_inputs() {
+    let mut buf = [0u8; 4];
+    let mut valid = Reader::new(&[0xA2, 0xC3, 0xA9]); // "é"
+    assert_eq!(expect::utf8(&mut valid, &mut buf), Some(2));
+    assert_eq!(&buf[..2], &[0xC3, 0xA9]);
+    assert_eq!(valid.error(), Error::Ok);
+    assert_eq!(valid.used(), 3);
+
+    let mut invalid_buf = [0u8; 2];
+    let mut invalid = Reader::new(&[0xA2, 0xC3, 0x28]);
+    assert_eq!(expect::utf8(&mut invalid, &mut invalid_buf), None);
+    assert_eq!(invalid.error(), Error::Type);
+    assert_eq!(invalid.used(), 3);
+}
+
+#[test]
+fn utf8__too_small_sets_toobig_without_consuming_payload() {
+    let mut buf = [0u8; 1];
+    let mut reader = Reader::new(&[0xA2, 0xC3, 0xA9]);
+    assert_eq!(expect::utf8(&mut reader, &mut buf), None);
+    assert_eq!(reader.error(), Error::TooBig);
+    assert_eq!(reader.used(), 1);
+    assert_eq!(reader.remaining(), 2);
+}
+
+#[test]
+fn str_match__exact_match_accepts_and_mismatch_sets_type() {
+    let mut ok = Reader::new(&[0xA3, b'k', b'e', b'y']);
+    assert!(expect::str_match(&mut ok, b"key"));
+    assert_eq!(ok.error(), Error::Ok);
+    assert_eq!(ok.used(), 4);
+
+    let mut wrong = Reader::new(&[0xA3, b'k', b'e', b'x']);
+    assert!(!expect::str_match(&mut wrong, b"key"));
+    assert_eq!(wrong.error(), Error::Type);
+    assert_eq!(wrong.used(), 4);
+}
+
+#[test]
+fn cstr__happy_writes_nul_terminated_bytes() {
+    let mut buf = [0xAA; 4];
+    let mut reader = Reader::new(&[0xA3, b'a', b'b', b'c']);
+    assert!(expect::cstr(&mut reader, &mut buf));
+    assert_eq!(&buf, b"abc\0");
+    assert_eq!(reader.error(), Error::Ok);
+    assert_eq!(reader.used(), 4);
+}
+
+#[test]
+fn cstr__embedded_nul_and_too_small_follow_c_rules() {
+    let mut with_nul = [0xAA; 4];
+    let mut nul_reader = Reader::new(&[0xA3, b'a', 0x00, b'b']);
+    assert!(!expect::cstr(&mut nul_reader, &mut with_nul));
+    assert_eq!(nul_reader.error(), Error::Type);
+    assert_eq!(nul_reader.used(), 4);
+    assert_eq!(with_nul[0], 0);
+
+    let mut too_small = [0xAA; 3];
+    let mut small_reader = Reader::new(&[0xA3, b'a', b'b', b'c']);
+    assert!(!expect::cstr(&mut small_reader, &mut too_small));
+    assert_eq!(small_reader.error(), Error::TooBig);
+    assert_eq!(small_reader.used(), 1);
+    assert_eq!(small_reader.remaining(), 3);
+    assert_eq!(too_small[0], 0);
+}
+
+#[test]
+fn utf8_cstr__happy_invalid_utf8_and_too_small() {
+    let mut ok_buf = [0xAA; 3];
+    let mut ok = Reader::new(&[0xA2, 0xC3, 0xA9]);
+    assert!(expect::utf8_cstr(&mut ok, &mut ok_buf));
+    assert_eq!(&ok_buf, &[0xC3, 0xA9, 0x00]);
+    assert_eq!(ok.error(), Error::Ok);
+    assert_eq!(ok.used(), 3);
+
+    let mut invalid_buf = [0xAA; 3];
+    let mut invalid = Reader::new(&[0xA2, 0xC3, 0x28]);
+    assert!(!expect::utf8_cstr(&mut invalid, &mut invalid_buf));
+    assert_eq!(invalid.error(), Error::Type);
+    assert_eq!(invalid.used(), 3);
+    assert_eq!(invalid_buf[0], 0);
+
+    let mut too_small_buf = [0xAA; 2];
+    let mut too_small = Reader::new(&[0xA2, 0xC3, 0xA9]);
+    assert!(!expect::utf8_cstr(&mut too_small, &mut too_small_buf));
+    assert_eq!(too_small.error(), Error::TooBig);
+    assert_eq!(too_small.used(), 1);
+    assert_eq!(too_small.remaining(), 2);
+    assert_eq!(too_small_buf[0], 0);
+}
+
+#[test]
+fn bin__happy_header_and_payload_copy() {
+    let mut header = Reader::new(&[0xC4, 0x03, 1, 2, 3]);
+    assert_eq!(expect::bin(&mut header), Some(3));
+    assert_eq!(header.error(), Error::Ok);
+    assert_eq!(header.used(), 2);
+
+    let mut buf = [0u8; 3];
+    let mut full = Reader::new(&[0xC4, 0x03, 1, 2, 3]);
+    assert_eq!(expect::bin_buf(&mut full, &mut buf), Some(3));
+    assert_eq!(&buf, &[1, 2, 3]);
+    assert_eq!(full.error(), Error::Ok);
+    assert_eq!(full.used(), 5);
+}
+
+#[test]
+fn bin_buf_and_bin_size_buf__buffer_and_size_failures_match_c() {
+    let mut small = [0u8; 2];
+    let mut too_small = Reader::new(&[0xC4, 0x03, 1, 2, 3]);
+    assert_eq!(expect::bin_buf(&mut too_small, &mut small), None);
+    assert_eq!(too_small.error(), Error::TooBig);
+    assert_eq!(too_small.used(), 2);
+    assert_eq!(too_small.remaining(), 3);
+
+    let mut exact = [0u8; 2];
+    let mut wrong_size = Reader::new(&[0xC4, 0x03, 1, 2, 3]);
+    assert!(!expect::bin_size_buf(&mut wrong_size, &mut exact, 2));
+    assert_eq!(wrong_size.error(), Error::Type);
+    assert_eq!(wrong_size.used(), 2);
+    assert_eq!(wrong_size.remaining(), 3);
+}
+
+#[test]
+fn ext__happy_and_ext_buf_too_small() {
+    // fixext1 type=5 payload=0xAA
+    let mut header = Reader::new(&[0xD4, 0x05, 0xAA]);
+    assert_eq!(expect::ext(&mut header), Some((5, 1)));
+    assert_eq!(header.error(), Error::Ok);
+    assert_eq!(header.used(), 2);
+
+    let mut ok_buf = [0u8; 1];
+    let mut full = Reader::new(&[0xD4, 0x05, 0xAA]);
+    assert_eq!(expect::ext_buf(&mut full, &mut ok_buf), Some((5, 1)));
+    assert_eq!(&ok_buf, &[0xAA]);
+    assert_eq!(full.error(), Error::Ok);
+    assert_eq!(full.used(), 3);
+
+    let mut small_buf = [];
+    let mut too_small = Reader::new(&[0xD4, 0x05, 0xAA]);
+    assert_eq!(expect::ext_buf(&mut too_small, &mut small_buf), None);
+    assert_eq!(too_small.error(), Error::TooBig);
+    assert_eq!(too_small.used(), 2);
+    assert_eq!(too_small.remaining(), 1);
+}
+
