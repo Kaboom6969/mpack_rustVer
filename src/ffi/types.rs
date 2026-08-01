@@ -17,6 +17,14 @@ pub const MPACK_ERROR_BUG: MpackError = 8;
 pub const MPACK_ERROR_DATA: MpackError = 9;
 pub const MPACK_ERROR_EOF: MpackError = 10;
 
+/// C `mpack_tag_t` for the no-extensions `embed-writer` configuration.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MpackTag {
+    pub type_: c_int,
+    pub value: u64,
+}
+
 pub type MpackWriterFlush = Option<unsafe extern "C" fn(*mut MpackWriter, *const c_char, usize)>;
 pub type MpackWriterError = Option<unsafe extern "C" fn(*mut MpackWriter, MpackError)>;
 pub type MpackWriterTeardown = Option<unsafe extern "C" fn(*mut MpackWriter)>;

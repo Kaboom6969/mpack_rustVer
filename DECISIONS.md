@@ -61,6 +61,15 @@ process-aborting panics if a consumer builds the library with `panic = "abort"`.
 ### Deferred writer features
 
 The initial slice clears the flush, error, teardown, and context fields during
-initialization but does not invoke user callbacks. Allocator-backed writers,
-flush and teardown callbacks, tracking, builder support, and frozen-suite
-integration are deferred to later vertical slices.
+initialization. It supports an explicitly requested fixed-buffer
+`mpack_writer_flush_message()` callback, but allocator-backed writers, error
+and teardown callbacks, tracking, builder support, and full frozen-suite
+behavioral parity are deferred to later vertical slices.
+
+### Frozen-suite link adapter
+
+`tests/port/frozen-link/` compiles `mpack-platform.c` only to emit MPack's
+header-inline ABI definitions, then links the frozen test objects to the Rust
+`cdylib`. It does not compile any C encoder, decoder, expect, or node source.
+This adapter is necessary because C11 header inlines such as
+`mpack_writer_error()` require one external definition in debug builds.
