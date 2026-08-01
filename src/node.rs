@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use crate::common::{Error, Tag, Type};
+use crate::reader::Reader;
 
 /// Parsed MessagePack tree over caller-owned input bytes.
 ///
@@ -49,12 +50,23 @@ impl<'data> Tree<'data> {
     ///
     /// Stub: leaves `Error::Unsupported` and no root. Teammate replaces body.
     pub fn parse(data: &'data [u8]) -> Self {
-        Self {
+        let mut reader = Reader::new(data);
+        let mut nodes = Vec::new();
+        let root = parse_node(&mut reader, &mut nodes);
+
+        let mut tree = Self {
             data,
-            nodes: Vec::new(),
-            root: None,
-            error: Cell::new(Error::Unsupported),
+            nodes,
+            root,
+            error: Cell::new(reader.error()),
+        };
+
+        if tree.error.get() == Error::Ok && reader.remaining() != 0 {
+            tree.error.set(Error::Data);
+            tree.root = None;
         }
+
+        tree
     }
 
     /// Returns the tree's sticky error.
@@ -76,6 +88,49 @@ impl<'data> Tree<'data> {
         }
         self.root.map(|index| Node { tree: self, index })
     }
+}
+
+fn parse_node<'data>(reader: &mut Reader<'data>, nodes: &mut Vec<NodeData>) -> Option<usize> {
+    let tag = reader.read_tag()?;
+    let payload_off = reader.used();
+    let mut children = Vec::new();
+
+    match tag {
+        Tag::Str(length) | Tag::Bin(length) | Tag::Ext { length, .. } => {
+            if !reader.skip_bytes(length as usize) {
+                return None;
+            }
+        }
+        Tag::Array(count) => {
+            for _ in 0..count {
+                let child = parse_node(reader, nodes)?;
+                children.push(child);
+                if reader.error() != Error::Ok {
+                    return None;
+                }
+            }
+        }
+        Tag::Map(count) => {
+            for _ in 0..count {
+                let key = parse_node(reader, nodes)?;
+                let value = parse_node(reader, nodes)?;
+                children.push(key);
+                children.push(value);
+                if reader.error() != Error::Ok {
+                    return None;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let index = nodes.len();
+    nodes.push(NodeData {
+        tag,
+        payload_off,
+        children,
+    });
+    Some(index)
 }
 
 impl<'tree, 'data> Node<'tree, 'data> {

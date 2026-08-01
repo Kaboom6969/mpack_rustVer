@@ -4,10 +4,11 @@ use mpack::common::{Error, Tag, Type};
 use mpack::node::Tree;
 
 #[test]
-fn locked_parse_stub_is_unsupported_until_implemented() {
+fn parse_nil_is_ok_and_has_root() {
     let tree = Tree::parse(&[0xc0]);
-    assert_eq!(tree.error(), Error::Unsupported);
-    assert!(tree.root().is_none());
+    assert_eq!(tree.error(), Error::Ok);
+    let root = tree.root().expect("root");
+    assert_eq!(root.type_(), Type::Nil);
 }
 
 #[test]
