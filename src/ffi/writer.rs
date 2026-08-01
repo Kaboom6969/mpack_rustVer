@@ -677,6 +677,8 @@ pub unsafe extern "C" fn mpack_write_tag(writer: *mut MpackWriter, tag: MpackTag
             8 => core.write_bin_header(tag.value as usize),
             9 => core.write_array_header(tag.value as usize),
             10 => core.write_map_header(tag.value as usize),
+            #[cfg(feature = "full-suite-abi")]
+            11 => core.write_ext_header(tag.exttype, tag.value as usize),
             _ => flag_bug(writer),
         });
     })

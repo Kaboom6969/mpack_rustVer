@@ -5,6 +5,12 @@ use std::slice;
 
 use crate::ffi::types::MpackTag;
 
+#[cfg(feature = "full-suite-abi")]
+unsafe extern "C" {
+    /// Provided by the frozen suite under `MPACK_CUSTOM_ASSERT`.
+    fn mpack_assert_fail(message: *const c_char);
+}
+
 const TYPE_MISSING: i32 = 0;
 const TYPE_NIL: i32 = 1;
 const TYPE_BOOL: i32 = 2;
@@ -16,6 +22,8 @@ const TYPE_STR: i32 = 7;
 const TYPE_BIN: i32 = 8;
 const TYPE_ARRAY: i32 = 9;
 const TYPE_MAP: i32 = 10;
+#[cfg(feature = "full-suite-abi")]
+const TYPE_EXT: i32 = 11;
 
 /// Compares C ABI tags with MPack's numeric normalization rules.
 #[no_mangle]
@@ -40,6 +48,23 @@ pub extern "C" fn mpack_tag_cmp(mut left: MpackTag, mut right: MpackTag) -> i32 
         TYPE_DOUBLE => compare_unsigned(left.value, right.value),
         TYPE_INT => compare_signed(left.value as i64, right.value as i64),
         TYPE_UINT => compare_unsigned(left.value, right.value),
+        #[cfg(feature = "full-suite-abi")]
+        TYPE_EXT => {
+            if left.exttype == right.exttype {
+                compare_unsigned(left.value & u32::MAX as u64, right.value & u32::MAX as u64)
+            } else {
+                (left.exttype as i32) - (right.exttype as i32)
+            }
+        }
+        #[cfg(feature = "full-suite-abi")]
+        _ => {
+            // Match C: unrecognized tags assert under debug unit tests.
+            unsafe {
+                mpack_assert_fail(c"unrecognized type in mpack_tag_cmp".as_ptr());
+            }
+            1
+        }
+        #[cfg(not(feature = "full-suite-abi"))]
         _ => 1,
     }
 }
@@ -97,6 +122,8 @@ pub extern "C" fn mpack_type_to_string(type_: c_int) -> *const c_char {
         TYPE_BIN => c"mpack_type_bin".as_ptr(),
         TYPE_ARRAY => c"mpack_type_array".as_ptr(),
         TYPE_MAP => c"mpack_type_map".as_ptr(),
+        #[cfg(feature = "full-suite-abi")]
+        TYPE_EXT => c"mpack_type_ext".as_ptr(),
         _ => c"(unknown mpack_type_t)".as_ptr(),
     }
 }
