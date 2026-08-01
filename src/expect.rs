@@ -536,33 +536,47 @@ fn tags_equal(left: Tag, right: Tag) -> bool {
 }
 
 pub fn key_uint(reader: &mut Reader<'_>, found: &mut [bool]) -> Option<usize> {
+    if found.is_empty() {
+        reader.flag_error(Error::Bug);
+        return None;
+    }
+    if !matches!(reader.peek_tag()?, Tag::Uint(_)) {
+        reader.discard();
+        return Some(found.len());
+    }
     let key = u64(reader)?;
     if key >= found.len() as u64 {
-        return type_error(reader);
+        return Some(found.len());
     }
     let index = key as usize;
     if found[index] {
-        return type_error(reader);
+        reader.flag_error(Error::Invalid);
+        return None;
     }
     found[index] = true;
     Some(index)
 }
 
 pub fn key_cstr(reader: &mut Reader<'_>, keys: &[&str], found: &mut [bool]) -> Option<usize> {
-    if keys.len() != found.len() {
+    if keys.is_empty() || keys.len() != found.len() {
         reader.flag_error(Error::Bug);
         return None;
+    }
+    if !matches!(reader.peek_tag()?, Tag::Str(_)) {
+        reader.discard();
+        return Some(keys.len());
     }
     let length = r#str(reader)? as usize;
     let bytes = reader.read_bytes(length)?;
     for (index, key) in keys.iter().enumerate() {
         if key.as_bytes() == bytes {
             if found[index] {
-                return type_error(reader);
+                reader.flag_error(Error::Invalid);
+                return None;
             }
             found[index] = true;
             return Some(index);
         }
     }
-    type_error(reader)
+    Some(keys.len())
 }
