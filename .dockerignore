@@ -1,0 +1,13 @@
+.git
+.idea
+.cursor
+.trae
+original_c
+tests/original
+target
+*.md
+!README.md
+!DECISIONS.md
+fuzz
+bench
+AGENTS.md

@@ -1,0 +1,5 @@
+track = "C → Rust"
+source_url = "https://github.com/ludocode/mpack"
+source_version = "1.1.1"
+kickoff_hash = "d783c11fed7baa653048d9ec84bc203f452db358"
+tests_content_hash = "0e47c5b09e4f7c91e7ac82a6f4aae94ad023c1099bfc3fe73b7e488394c4ee59"

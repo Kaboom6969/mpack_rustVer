@@ -1,0 +1,26 @@
+{
+  "status": "placeholder",
+  "note": "Metrics not yet measured; fill after encode/decode parity exists.",
+  "environment": {
+    "cpu": null,
+    "os": null,
+    "rustc": null,
+    "cc": null
+  },
+  "c_reference": {
+    "encode_throughput_docs_per_s": null,
+    "decode_throughput_docs_per_s": null,
+    "encode_p99_ns": null,
+    "decode_p99_ns": null,
+    "rss_peak_bytes": null,
+    "startup_ms": null
+  },
+  "rust_port": {
+    "encode_throughput_docs_per_s": null,
+    "decode_throughput_docs_per_s": null,
+    "encode_p99_ns": null,
+    "decode_p99_ns": null,
+    "rss_peak_bytes": null,
+    "startup_ms": null
+  }
+}
