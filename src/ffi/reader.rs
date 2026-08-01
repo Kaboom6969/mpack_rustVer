@@ -4,7 +4,7 @@
 //! builds a temporary safe-core [`crate::reader::Reader`] over `data..end`,
 //! advances the C cursor, and maps sticky errors through `flag_error`.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 use std::ptr;
 use std::slice;
@@ -1371,7 +1371,7 @@ pub unsafe extern "C" fn mpack_print_data_to_buffer(
     });
 }
 
-/// Pretty-prints MessagePack data to a stdio FILE.
+/// Pretty-prints MessagePack data to a stdio FILE (C depth-2 indent + trailing newline).
 #[no_mangle]
 pub unsafe extern "C" fn mpack_print_data_to_file(
     data: *const c_char,
@@ -1382,15 +1382,34 @@ pub unsafe extern "C" fn mpack_print_data_to_file(
         return;
     }
     let _ = catch_ffi_panic(|| {
-        let mut buffer = vec![0u8; 4096];
-        unsafe {
-            mpack_print_data_to_buffer(data, len, buffer.as_mut_ptr().cast(), buffer.len());
+        let input = if data.is_null() || len == 0 {
+            &[][..]
+        } else {
+            unsafe { slice::from_raw_parts(data.cast::<u8>(), len) }
+        };
+        let mut output = Vec::new();
+        // C `mpack_print_data_to_file` starts at depth 2.
+        for _ in 0..2 {
+            let _ = write!(output, "    ");
         }
-        let cstr = unsafe { CStr::from_ptr(buffer.as_ptr().cast()) };
-        let bytes = cstr.to_bytes();
+        let mut core = Reader::new(input);
+        print_element(&mut core, &mut output, 2);
+        let remaining = core.remaining();
+        if core.error() != crate::common::Error::Ok {
+            let _ = write!(
+                &mut output,
+                "\n<mpack parsing error {}>",
+                error_name(core.error())
+            );
+        } else if remaining > 0 {
+            let _ = write!(
+                &mut output,
+                "\n<{remaining} extra bytes at end of message>"
+            );
+        }
+        output.push(b'\n');
         unsafe {
-            fwrite(bytes.as_ptr().cast(), 1, bytes.len(), file);
-            fwrite(c"\n".as_ptr().cast(), 1, 1, file);
+            fwrite(output.as_ptr().cast(), 1, output.len(), file);
         }
     });
 }

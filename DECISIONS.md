@@ -142,6 +142,13 @@ This slice targets `test-reader.c` green under
   optional fseek skip + teardown) so file EOF loops can reach `mpack_error_eof`
   without hanging the everything suite
 
+Frozen-link scaffolding: `tests/port/frozen-link/run.py` creates a repo-root
+`test` symlink to `tests/original/test` before running the everything suite so
+relative fixture paths (`test/messagepack/...`, `test/pseudojson/...`) resolve.
+Without that link, `test_compare_print` soft-continues on a missing expected
+file and then `memcmp`s a NULL pointer (SIGSEGV) once `print_data_to_file`
+writes a non-empty actual file.
+
 Deferred (Expect / buffer / fuller file parity):
 
 - Real `mpack_track_*` stack: `mpack_done_type` is intentionally a **no-op** so

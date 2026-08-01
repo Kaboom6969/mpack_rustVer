@@ -175,6 +175,27 @@ def prepare_full_suite_extras(sources: list[Path]) -> None:
     sources.append(ctor)
 
 
+def ensure_unit_test_data_link() -> None:
+    """Ensure `test/` resolves MessagePack fixtures relative to the repo root.
+
+    Upstream unit tests open paths like `test/messagepack/...` with cwd at the
+    MPack project root. Frozen-link runs from the Rust repo root, so expose the
+    frozen fixture tree via a `test` symlink (or junction on Windows).
+    """
+    link = ROOT / "test"
+    target = ROOT / "tests" / "original" / "test"
+    if not target.is_dir():
+        raise SystemExit(f"missing frozen unit fixtures at {target}")
+    if link.is_symlink() or link.exists():
+        if link.is_dir() and (link / "messagepack").is_dir():
+            return
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        else:
+            raise SystemExit(f"refusing to replace unexpected path {link}")
+    link.symlink_to(target, target_is_directory=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -264,6 +285,7 @@ def main() -> int:
 
     if full_suite:
         prepare_full_suite_extras(sources)
+        ensure_unit_test_data_link()
 
     print(
         "+",
