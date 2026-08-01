@@ -1,7 +1,7 @@
 # Frozen C suite link checkpoint
 
 This directory provides a build path that leaves `tests/original/` unchanged
-while compiling its sources against the Rust `mpack` `cdylib`.
+while compiling its sources against the Rust `mpack` library.
 
 Run the first ABI checkpoint:
 
@@ -30,31 +30,41 @@ python3 tests/port/frozen-link/run.py --full
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tests/port/frozen-link/run.ps1 -Full -ExpectMissing
+powershell -ExecutionPolicy Bypass -File tests/port/frozen-link/run.ps1 -Full
 ```
 
-The latter command compiles every frozen unit source with the explicit
-`embed-writer` configuration from `tests/port/ffi-harness/include/`. Writer
-parity is complete when the command runs without `-ExpectMissing` and reports
-zero failures.
+This compiles every frozen unit source with the explicit `embed-writer`
+configuration from `tests/port/ffi-harness/include/`. Writer parity is green
+when the command reports zero failures (matching C `embed-writer-release`).
 
-## Default full-suite config (stub scaffolding)
+## Everything config (stub scaffolding)
 
-To link and run the frozen suite under its upstream default configuration
-(reader/expect/node/stdio/extensions/tracking/builder), build Rust with
-`full-suite-abi` and point includes at `tests/original/test/unit/src`:
+To link and run the frozen suite under the upstream **everything** configuration
+(reader/expect/node/stdio/compatibility/extensions/tracking/builder), build
+Rust with `full-suite-abi` and pass the same feature macros as C
+`run-everything-debug`:
 
 ```bash
-python3 tests/port/frozen-link/run.py --full --default-config
+python3 tests/port/frozen-link/run.py --full --everything
 ```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests/port/frozen-link/run.ps1 -Full -Everything
+```
+
+`--default-config` is kept as an alias for `--everything`.
 
 Unimplemented APIs are thin FFI stubs that set sticky `mpack_error_unsupported`
 and return zero/nil/`NULL`. The gate succeeds when the binary links, passes the
 C/Rust layout constructor check, and runs to completion. Assertion failures are
 expected until stubs are replaced with safe-core implementations.
 
-Because the frozen suite hardcodes `TEST_EARLY_EXIT=1`, the default-config
-adapter force-includes `c/soft_abort.h` to redirect `abort` to a returning
+Full-suite modes invoke `cargo rustc --crate-type staticlib` so suite symbols
+such as `test_malloc` / `mpack_assert_fail` resolve at final executable link
+(required on Windows, where a `cdylib` cannot leave those undefined).
+
+Because the frozen suite hardcodes `TEST_EARLY_EXIT=1`, the everything adapter
+force-includes `c/soft_abort.h` to redirect `abort` to a returning
 `mpack_soft_abort()` so the first failed assertion does not kill the process
 (and so GCC does not treat post-abort loop bodies as unreachable). It also
 links `c/quiet_printf.c` to swallow per-assertion `printf` spam from huge
