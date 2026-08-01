@@ -33,6 +33,28 @@ cargo test
 
 Rust tests live under `tests/port/` only. Do not modify `tests/original/`.
 
+### C-to-Rust FFI slice
+
+The first vertical slice implements fixed-buffer nil encoding for the upstream
+`embed-writer` configuration:
+
+```bash
+cargo test --manifest-path tests/port/ffi-harness/Cargo.toml
+```
+
+This command uses the platform C compiler through Cargo's `cc` build dependency.
+The test path is:
+
+```text
+Rust test runner -> C harness -> MPack C ABI -> safe Rust writer
+```
+
+The harness compiles the complete upstream MPack header chain with its own
+explicit `mpack-config.h`. It checks the C/Rust writer layout, header-inline
+accessors, `nil -> 0xc0`, sticky capacity errors, null-pointer hardening, and
+panic containment. The root build only compiles the C harness when the
+`ffi-harness` feature is enabled.
+
 ## Build (C reference suite)
 
 From `original_c/mpack-develop/` (use `CC=gcc`):
@@ -55,6 +77,8 @@ The image builds the crate and runs `cargo test` as the runnable smoke artifact.
 
 ## Status
 
-Scaffold stage: crate modules mirror C (`common` → `writer`/`reader` → `expect` →
-`node`). Full encode/decode parity and C-ABI FFI are still to be implemented.
-See [`DECISIONS.md`](DECISIONS.md) as divergences appear.
+The first safe-core-to-C-ABI vertical slice is complete for fixed-buffer nil
+encoding under `embed-writer`. Other writer operations, callbacks, allocation,
+reader/expect/node, and full frozen-suite parity remain to be implemented. See
+[`DECISIONS.md`](DECISIONS.md) for the exact ABI boundary and documented
+divergences.

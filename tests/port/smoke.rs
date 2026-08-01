@@ -9,6 +9,7 @@ fn crate_version_is_nonempty() {
 
 #[test]
 fn writer_starts_ok() {
-    let w = Writer::new();
+    let mut buffer = [0_u8; 1];
+    let w = Writer::new(&mut buffer);
     assert_eq!(w.error(), Error::Ok);
 }
