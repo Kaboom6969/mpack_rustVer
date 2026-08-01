@@ -32,6 +32,16 @@ pub enum Type {
     Ext,
 }
 
+/// Extension timestamp payload (`mpack_timestamp_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Timestamp {
+    pub seconds: i64,
+    pub nanoseconds: u32,
+}
+
+/// Maximum nanoseconds field for a timestamp (exclusive upper bound is +1).
+pub const TIMESTAMP_NANOSECONDS_MAX: u32 = 999_999_999;
+
 /// A decoded MessagePack tag.
 ///
 /// String, binary, array, map, and extension variants contain the payload or
