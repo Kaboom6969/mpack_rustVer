@@ -16,6 +16,9 @@ default = []
 ffi-harness = ["dep:cc"]
 # Full frozen-suite ABI (COMPATIBILITY/EXTENSIONS/tracking/builder/reader/node).
 # Mutually exclusive at the layout level with the default embed-writer ABI.
+# Used by frozen-link --everything (C everything) and --default-config.
+# Frozen-link builds this feature as `cargo rustc --crate-type staticlib` so
+# suite symbols (test_malloc / mpack_assert_fail) resolve at final executable link.
 full-suite-abi = []
 
 [dependencies]
