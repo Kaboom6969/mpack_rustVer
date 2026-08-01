@@ -1077,6 +1077,7 @@ fn utf8__happy_valid_and_invalid_inputs() {
     assert_eq!(expect::utf8(&mut invalid, &mut invalid_buf), None);
     assert_eq!(invalid.error(), Error::Type);
     assert_eq!(invalid.used(), 3);
+    assert_eq!(&invalid_buf, &[0xC3, 0x28]);
 }
 
 #[test]

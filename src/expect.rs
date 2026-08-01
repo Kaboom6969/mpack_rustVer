@@ -378,8 +378,13 @@ pub fn utf8(reader: &mut Reader<'_>, buf: &mut [u8]) -> Option<usize> {
     if length > buf.len() {
         return too_big(reader);
     }
-    let bytes = reader.read_bytes_utf8(length)?;
-    copy_bytes(buf, bytes)
+    let bytes = reader.read_bytes(length)?;
+    let written = copy_bytes(buf, bytes)?;
+    if !reader::check_utf8(&buf[..written]) {
+        reader.flag_error(Error::Type);
+        return None;
+    }
+    Some(written)
 }
 
 pub fn str_match(reader: &mut Reader<'_>, expected: &[u8]) -> bool {
