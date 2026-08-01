@@ -12,6 +12,14 @@ fn parse_nil_is_ok_and_has_root() {
 }
 
 #[test]
+fn parse_allows_trailing_bytes() {
+    let tree = Tree::parse(&[0xc0, 0xff]);
+    assert_eq!(tree.error(), Error::Ok);
+    let root = tree.root().expect("root");
+    assert_eq!(root.type_(), Type::Nil);
+}
+
+#[test]
 #[ignore = "Teammate A: implement Node safe-core (see DECISIONS.md Node freeze)"]
 fn parse_scalars_array_map_and_lookups() {
     let data = [

@@ -54,17 +54,12 @@ impl<'data> Tree<'data> {
         let mut nodes = Vec::new();
         let root = parse_node(&mut reader, &mut nodes);
 
-        let mut tree = Self {
+        let tree = Self {
             data,
             nodes,
             root,
             error: Cell::new(reader.error()),
         };
-
-        if tree.error.get() == Error::Ok && reader.remaining() != 0 {
-            tree.error.set(Error::Data);
-            tree.root = None;
-        }
 
         tree
     }
