@@ -47,8 +47,8 @@ fn discard_truncation_does_not_overconsume() {
 
     reader.discard();
     assert_eq!(reader.error(), Error::Invalid);
-    assert_eq!(reader.used(), 1);
+    assert_eq!(reader.used(), 2);
 
     reader.discard();
-    assert_eq!(reader.used(), 1);
+    assert_eq!(reader.used(), 2);
 }

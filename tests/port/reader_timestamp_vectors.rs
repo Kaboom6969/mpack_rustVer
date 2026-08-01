@@ -22,7 +22,8 @@ fn reads_timestamp64() {
     let nanoseconds = 42u64;
     let seconds = 1u64;
     let packed = (nanoseconds << 34) | seconds;
-    let mut reader = Reader::new(&packed.to_be_bytes());
+    let bytes = packed.to_be_bytes();
+    let mut reader = Reader::new(&bytes);
     assert_eq!(
         reader.read_timestamp(8),
         Some(Timestamp {
@@ -76,7 +77,8 @@ fn out_of_range_nanoseconds_is_atomic_and_sticky() {
     let nanoseconds = 1_000_000_000u64;
     let seconds = 0u64;
     let packed = (nanoseconds << 34) | seconds;
-    let mut reader = Reader::new(&packed.to_be_bytes());
+    let bytes = packed.to_be_bytes();
+    let mut reader = Reader::new(&bytes);
     assert_eq!(reader.read_timestamp(8), None);
     assert_eq!(reader.error(), Error::Invalid);
     assert_eq!(reader.used(), 0);

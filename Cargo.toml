@@ -40,6 +40,30 @@ name = "reader_core"
 path = "tests/port/reader_core.rs"
 
 [[test]]
+name = "reader_sticky_error"
+path = "tests/port/reader_sticky_error.rs"
+
+[[test]]
+name = "reader_eof_truncation"
+path = "tests/port/reader_eof_truncation.rs"
+
+[[test]]
+name = "reader_peek_position"
+path = "tests/port/reader_peek_position.rs"
+
+[[test]]
+name = "reader_discard_nested"
+path = "tests/port/reader_discard_nested.rs"
+
+[[test]]
+name = "reader_timestamp_vectors"
+path = "tests/port/reader_timestamp_vectors.rs"
+
+[[test]]
+name = "reader_utf8_invalid_matrix"
+path = "tests/port/reader_utf8_invalid_matrix.rs"
+
+[[test]]
 name = "safe_core_api"
 path = "tests/port/safe_core_api.rs"
 
