@@ -118,3 +118,26 @@ terminate after soft-continued assertions.
 The default (feature-off) build keeps the embed-writer ABI used by the existing
 green frozen-link gate. A single library build cannot satisfy both layouts at once.
 
+### Safe-core API freeze (Reader + Expect)
+
+Public items in `src/reader.rs` and `src/expect.rs` are a frozen contract for
+teammate safe-core work and later FFI wrapping:
+
+- Teammates may fill or fix function bodies and add tests under `tests/port/`
+  only. Signature or public type changes require lead approval.
+- These modules stay under `forbid(unsafe_code)`: no raw pointers, no C
+  callbacks, and no APIs that return allocator-owned `*mut` pointers.
+- Sticky errors use `common::Error`; a failed operation leaves
+  `reader.error()` set (same model as `Reader::read_tag`).
+- Expect is free functions taking `&mut Reader<'_>` (mirrors
+  `mpack_expect_*(reader)`). It must not grow a second parser.
+- Out of safe-core scope (FFI / lead): `init_filename` / `init_stdfile`,
+  fill+skip callbacks, `malloc` / `*_alloc`, and copying into C `char*` at the
+  ABI boundary. Safe core may expose `&[u8]` / `&mut [u8]` helpers; allocation
+  and pointer conversion stay in `src/ffi/`.
+- `*_or_nil` results use `expect::ExpectCompound { is_nil, count }` so FFI can
+  map to `(bool, *count)` without inventing another shape.
+- Rust keywords force raw identifiers for two Expect exports: `expect::r#bool`
+  and `expect::r#str` (still the locked names for C `mpack_expect_bool` /
+  `mpack_expect_str`). `true_` / `false_` avoid the `true` / `false` keywords.
+
