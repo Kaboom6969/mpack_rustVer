@@ -1211,3 +1211,179 @@ fn ext__happy_and_ext_buf_too_small() {
     assert_eq!(too_small.remaining(), 1);
 }
 
+// ===========================================================================
+// Phase 4: compound headers (map / array)
+// ===========================================================================
+
+#[test]
+fn map_and_array__happy_headers_and_wrong_type() {
+    let mut map_reader = Reader::new(&[0x82]); // fixmap(2)
+    assert_eq!(expect::map(&mut map_reader), Some(2));
+    assert_eq!(map_reader.error(), Error::Ok);
+    assert_eq!(map_reader.used(), 1);
+
+    let mut array_reader = Reader::new(&[0x93]); // fixarray(3)
+    assert_eq!(expect::array(&mut array_reader), Some(3));
+    assert_eq!(array_reader.error(), Error::Ok);
+    assert_eq!(array_reader.used(), 1);
+
+    let mut wrong_for_map = Reader::new(&[0x90]); // fixarray(0)
+    assert_eq!(expect::map(&mut wrong_for_map), None);
+    assert_eq!(wrong_for_map.error(), Error::Type);
+    assert_eq!(wrong_for_map.used(), 1);
+
+    let mut wrong_for_array = Reader::new(&[0x80]); // fixmap(0)
+    assert_eq!(expect::array(&mut wrong_for_array), None);
+    assert_eq!(wrong_for_array.error(), Error::Type);
+    assert_eq!(wrong_for_array.used(), 1);
+}
+
+#[test]
+fn map_and_array_range_and_match__inclusive_and_mismatch_behave_like_c() {
+    let mut map_ok = Reader::new(&[0x82]); // fixmap(2)
+    assert_eq!(expect::map_range(&mut map_ok, 1, 2), Some(2));
+    assert_eq!(map_ok.error(), Error::Ok);
+    assert_eq!(map_ok.used(), 1);
+
+    let mut map_out = Reader::new(&[0x83]); // fixmap(3)
+    assert_eq!(expect::map_range(&mut map_out, 0, 2), None);
+    assert_eq!(map_out.error(), Error::Type);
+    assert_eq!(map_out.used(), 1);
+
+    let mut map_match_ok = Reader::new(&[0x81]); // fixmap(1)
+    assert!(expect::map_match(&mut map_match_ok, 1));
+    assert_eq!(map_match_ok.error(), Error::Ok);
+    assert_eq!(map_match_ok.used(), 1);
+
+    let mut map_match_bad = Reader::new(&[0x82]); // fixmap(2)
+    assert!(!expect::map_match(&mut map_match_bad, 1));
+    assert_eq!(map_match_bad.error(), Error::Type);
+    assert_eq!(map_match_bad.used(), 1);
+
+    let mut array_ok = Reader::new(&[0x92]); // fixarray(2)
+    assert_eq!(expect::array_range(&mut array_ok, 1, 2), Some(2));
+    assert_eq!(array_ok.error(), Error::Ok);
+    assert_eq!(array_ok.used(), 1);
+
+    let mut array_out = Reader::new(&[0x90]); // fixarray(0)
+    assert_eq!(expect::array_range(&mut array_out, 1, 2), None);
+    assert_eq!(array_out.error(), Error::Type);
+    assert_eq!(array_out.used(), 1);
+
+    let mut array_match_ok = Reader::new(&[0x90]); // fixarray(0)
+    assert!(expect::array_match(&mut array_match_ok, 0));
+    assert_eq!(array_match_ok.error(), Error::Ok);
+    assert_eq!(array_match_ok.used(), 1);
+
+    let mut array_match_bad = Reader::new(&[0x91]); // fixarray(1)
+    assert!(!expect::array_match(&mut array_match_bad, 0));
+    assert_eq!(array_match_bad.error(), Error::Type);
+    assert_eq!(array_match_bad.used(), 1);
+}
+
+#[test]
+fn map_and_array_or_nil__nil_present_and_wrong_type_cases() {
+    let mut map_nil = Reader::new(&[0xC0]);
+    assert_eq!(
+        expect::map_or_nil(&mut map_nil),
+        Some(expect::ExpectCompound {
+            is_nil: true,
+            count: 0,
+        })
+    );
+    assert_eq!(map_nil.error(), Error::Ok);
+    assert_eq!(map_nil.used(), 1);
+
+    let mut map_present = Reader::new(&[0x81]); // fixmap(1)
+    assert_eq!(
+        expect::map_or_nil(&mut map_present),
+        Some(expect::ExpectCompound {
+            is_nil: false,
+            count: 1,
+        })
+    );
+    assert_eq!(map_present.error(), Error::Ok);
+    assert_eq!(map_present.used(), 1);
+
+    let mut map_wrong = Reader::new(&[0x91]); // fixarray(1)
+    assert_eq!(expect::map_or_nil(&mut map_wrong), None);
+    assert_eq!(map_wrong.error(), Error::Type);
+    assert_eq!(map_wrong.used(), 1);
+
+    let mut array_nil = Reader::new(&[0xC0]);
+    assert_eq!(
+        expect::array_or_nil(&mut array_nil),
+        Some(expect::ExpectCompound {
+            is_nil: true,
+            count: 0,
+        })
+    );
+    assert_eq!(array_nil.error(), Error::Ok);
+    assert_eq!(array_nil.used(), 1);
+
+    let mut array_present = Reader::new(&[0x92]); // fixarray(2)
+    assert_eq!(
+        expect::array_or_nil(&mut array_present),
+        Some(expect::ExpectCompound {
+            is_nil: false,
+            count: 2,
+        })
+    );
+    assert_eq!(array_present.error(), Error::Ok);
+    assert_eq!(array_present.used(), 1);
+
+    let mut array_wrong = Reader::new(&[0x82]); // fixmap(2)
+    assert_eq!(expect::array_or_nil(&mut array_wrong), None);
+    assert_eq!(array_wrong.error(), Error::Type);
+    assert_eq!(array_wrong.used(), 1);
+}
+
+#[test]
+fn map_and_array_max_or_nil__max_bound_and_sticky_error() {
+    let mut map_ok = Reader::new(&[0x82]); // fixmap(2)
+    assert_eq!(
+        expect::map_max_or_nil(&mut map_ok, 2),
+        Some(expect::ExpectCompound {
+            is_nil: false,
+            count: 2,
+        })
+    );
+    assert_eq!(map_ok.error(), Error::Ok);
+    assert_eq!(map_ok.used(), 1);
+
+    let mut map_too_large = Reader::new(&[0x83]); // fixmap(3)
+    assert_eq!(expect::map_max_or_nil(&mut map_too_large, 2), None);
+    assert_eq!(map_too_large.error(), Error::Type);
+    assert_eq!(map_too_large.used(), 1);
+
+    let mut array_ok = Reader::new(&[0x92]); // fixarray(2)
+    assert_eq!(
+        expect::array_max_or_nil(&mut array_ok, 2),
+        Some(expect::ExpectCompound {
+            is_nil: false,
+            count: 2,
+        })
+    );
+    assert_eq!(array_ok.error(), Error::Ok);
+    assert_eq!(array_ok.used(), 1);
+
+    let mut array_too_large = Reader::new(&[0x93]); // fixarray(3)
+    assert_eq!(expect::array_max_or_nil(&mut array_too_large, 2), None);
+    assert_eq!(array_too_large.error(), Error::Type);
+    assert_eq!(array_too_large.used(), 1);
+
+    let mut sticky_map = Reader::new(&[0x80]);
+    sticky_map.flag_error(Error::Bug);
+    let used_before = sticky_map.used();
+    assert_eq!(expect::map_or_nil(&mut sticky_map), None);
+    assert_eq!(sticky_map.error(), Error::Bug);
+    assert_eq!(sticky_map.used(), used_before);
+
+    let mut sticky_array = Reader::new(&[0x90]);
+    sticky_array.flag_error(Error::Data);
+    let used_before = sticky_array.used();
+    assert_eq!(expect::array_or_nil(&mut sticky_array), None);
+    assert_eq!(sticky_array.error(), Error::Data);
+    assert_eq!(sticky_array.used(), used_before);
+}
+
