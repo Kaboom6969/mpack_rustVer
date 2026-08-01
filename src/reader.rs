@@ -102,7 +102,12 @@ impl<'data> Reader<'data> {
             self.flag_error(Error::Invalid);
             return None;
         }
-        let bytes = self.read_bytes(size)?;
+        if !self.require(size) {
+            return None;
+        }
+        let start = self.position;
+        let end = start + size;
+        let bytes = &self.data[start..end];
         let timestamp = match size {
             4 => Timestamp {
                 seconds: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
@@ -130,6 +135,7 @@ impl<'data> Reader<'data> {
             self.flag_error(Error::Invalid);
             return None;
         }
+        self.position = end;
         Some(timestamp)
     }
 
