@@ -1,5 +1,5 @@
 /*
- * Force-included under --default-config only.
+ * Force-included under --everything / --default-config (alias) only.
  *
  * The frozen suite hardcodes TEST_EARLY_EXIT which calls abort() on failure.
  * GCC treats abort as noreturn, so wrapping the libc symbol still leaves

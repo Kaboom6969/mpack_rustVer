@@ -182,8 +182,10 @@ if ($LASTEXITCODE -ne 0) {
 & $Output
 $SuiteExit = $LASTEXITCODE
 if ($FullSuite) {
-    if ($SuiteExit -lt 0) {
-        Write-Host "Everything frozen suite aborted (signal); treating as failure."
+    # Match run.py: Python signals are <0; Windows SEH / abnormal exits are >=128
+    # (e.g. STATUS_ACCESS_VIOLATION = 0xC0000005). Assertion failures return 1.
+    if ($SuiteExit -lt 0 -or $SuiteExit -ge 128) {
+        Write-Host "Everything frozen suite crashed (exit=$SuiteExit); treating as failure."
         exit 1
     }
     Write-Host "Everything frozen suite finished (exit=$SuiteExit; assertion failures expected with stubs)."

@@ -100,6 +100,12 @@ suite-provided symbols (`test_malloc`, `mpack_assert_fail`) resolve when linking
 the final executable. A Windows `cdylib` cannot leave those undefined at DLL
 link time.
 
+Everything-gate crash detection treats exit `< 0` or `>= 128` as failure
+(Linux signal encoding and Windows SEH / abnormal statuses such as
+`0xC0000005`); normal assertion failure is `EXIT_FAILURE` (`1`). The gate
+expects GCC/MinGW (`CC=gcc`); the MSVC `cl` path does not force-include the
+soft-abort / quiet-printf adapters.
+
 `mpack_discard` under stubs forces `mpack_error_eof` even when init already set
 `mpack_error_unsupported`, so EOF-wait loops such as `test_file_read_eof` can
 terminate after soft-continued assertions.
