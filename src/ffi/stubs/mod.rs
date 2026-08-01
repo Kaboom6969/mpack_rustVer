@@ -7,5 +7,4 @@ pub(crate) mod util;
 pub mod expect;
 pub mod node;
 pub mod print;
-pub mod reader;
 pub mod track;

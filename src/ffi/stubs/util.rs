@@ -26,24 +26,6 @@ pub(crate) unsafe fn flag_reader(reader: *mut MpackReader) {
     }
 }
 
-pub(crate) unsafe fn init_reader(reader: *mut MpackReader) {
-    if reader.is_null() {
-        return;
-    }
-    unsafe { reader.write(MpackReader::unsupported()) };
-}
-
-pub(crate) unsafe fn destroy_reader(reader: *mut MpackReader) -> MpackError {
-    if reader.is_null() {
-        return MPACK_ERROR_UNSUPPORTED;
-    }
-    let state = unsafe { &mut *reader };
-    if let Some(teardown) = state.teardown.take() {
-        unsafe { teardown(reader) };
-    }
-    state.error
-}
-
 pub(crate) unsafe fn init_tree(tree: *mut MpackTree) {
     if tree.is_null() {
         return;
