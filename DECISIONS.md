@@ -146,6 +146,15 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
 | Evidence | Optional `fuzz/log.txt` after timed clean runs | Documents smoke; not a substitute for frozen-suite module gates. |
 
+## Upstream C findings (suite / fuzz only)
+
+Discovered empirically via original C sanitizer suite (not by reading C TODOs).
+Full run log: `fuzz/c_findings.md`.
+
+| Finding | Evidence | Rust port |
+| --- | --- | --- |
+| `mpack_write_str(writer, NULL, 0)` is C undefined behavior: null source passed to `mpack_memcpy` when `count == 0`. Two build paths: `MPACK_OPTIMIZE_FOR_SIZE=0` fixstr fast path (`mpack-writer.c:1266`); `MPACK_OPTIMIZE_FOR_SIZE=1` via `mpack_write_native` (`mpack-writer.c:526`). `mpack_write_utf8(NULL, 0)` reaches the same UB after `mpack_utf8_check` (length 0 does not read the pointer) then `mpack_write_str`. Unit test `test_write_utf8` expects `NOERROR`. Not MessagePack-byte-triggered; caller must pass `(NULL, 0)`. | `run-sanitize-undefined-debug` (SIZE=0 default) UBSan at `:1266`, stack `test-write.c:1022`. Minimal SIZE=0/1 repros both hit UBSan, emit `0xa0`, `error=0` (see `fuzz/c_findings.md`). ASan unit + AFL++ `fuzz.c` (600s) found no memory crashes (AFL does not call this writer API shape). | Hardened separately: `mpack_write_str` / `mpack_write_bytes` / `mpack_write_object_bytes` via `write_c_bytes` (null+zero → `&[]`; null+nonzero → sticky `bug`). `mpack_write_utf8` does **not** use `write_c_bytes`; it has its own null/count branch then writes via safe core (`src/ffi/writer.rs`). |
+
 ## Explicit non-goals (for now)
 
 - Replacing the frozen C suite with `tests/port/` as the sole correctness proof for a claimed module.
