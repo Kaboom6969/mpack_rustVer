@@ -593,3 +593,22 @@ impl<'tree, 'data> Node<'tree, 'data> {
         None
     }
 }
+
+/// Byte-size gates for loading a whole file into a tree (C `mpack_file_tree_read`).
+///
+/// - `file_size < 0` → [`Error::Io`]
+/// - `file_size == 0` → [`Error::Invalid`] (empty file)
+/// - `max_bytes != 0 && size > max_bytes` → [`Error::TooBig`] (never truncate)
+pub fn check_file_tree_bytes(file_size: i64, max_bytes: usize) -> Result<usize, Error> {
+    if file_size < 0 {
+        return Err(Error::Io);
+    }
+    if file_size == 0 {
+        return Err(Error::Invalid);
+    }
+    let size = file_size as usize;
+    if max_bytes != 0 && size > max_bytes {
+        return Err(Error::TooBig);
+    }
+    Ok(size)
+}

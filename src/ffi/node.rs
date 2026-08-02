@@ -374,11 +374,10 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
         },
     );
 
-    let max_size = with_state(tree, usize::MAX, |s| s.max_size);
-    if data_length > max_size {
-        flag_tree_error(tree, MPACK_ERROR_TOO_BIG);
-        return false;
-    }
+    // `max_size` is a *message* / stream-accumulation limit (C `tree->max_size`),
+    // not a cap on the whole `data_length` buffer. Multi-message `init_data`
+    // buffers may exceed `max_size` while each message is fine. Stream fill
+    // enforces the cap when growing `owned_data` (see `fill_stream`).
 
     // Parse via safe core
     let max_nodes_opt = if max_nodes == usize::MAX { None } else { Some(max_nodes) };
@@ -469,8 +468,8 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
     true
 }
 
-/// Streaming fill: read all available data via read_fn into owned_data,
-/// then update tree.data / tree.data_length.
+/// Streaming fill: read via `read_fn` into `owned_data`, capped by `max_size`
+/// (C `tree->max_size` — max bytes accumulated for the current message).
 /// Returns false if an error was flagged.
 fn fill_stream(tree: *mut MpackTree, blocking: bool) -> bool {
     let read_fn = unsafe { (*tree).read_fn };
@@ -481,18 +480,27 @@ fn fill_stream(tree: *mut MpackTree, blocking: bool) -> bool {
     let mut chunk = vec![0u8; INITIAL_STREAM_CAPACITY];
 
     loop {
-        let read = unsafe { read_fn(tree, chunk.as_mut_ptr().cast(), chunk.len()) };
+        let current_len = with_state(tree, 0usize, |s| s.owned_data.len());
+        if current_len >= max_size {
+            // Already at the message-size cap; further growth would be too_big
+            // in C's reserve_fill. Stop filling and let parse consume what we have.
+            break;
+        }
+        let room = max_size - current_len;
+        let want = room.min(chunk.len());
+        let read = unsafe { read_fn(tree, chunk.as_mut_ptr().cast(), want) };
         if tree_error(tree) != MPACK_OK {
             return false;
         }
         if read == 0 || read == usize::MAX {
             break;
         }
-        let done = with_state(tree, false, |s| {
-            s.owned_data.extend_from_slice(&chunk[..read]);
-            s.owned_data.len() >= max_size
+        let take = read.min(room);
+        with_state(tree, (), |s| {
+            s.owned_data.extend_from_slice(&chunk[..take]);
         });
-        if done {
+        // Cap reached: refuse to grow further (align with C too_big on oversize fill).
+        if current_len + take >= max_size {
             break;
         }
         if !blocking {
@@ -814,29 +822,24 @@ pub unsafe extern "C" fn mpack_tree_set_limits(
 }
 
 fn load_file_data(file: *mut c_void, max_bytes: usize) -> Result<Vec<u8>, MpackError> {
-    // Seek to end to get size
+    // Align with C `mpack_file_tree_read` (mpack-node.c).
     if unsafe { fseek(file, 0, SEEK_END) } != 0 {
         return Err(MPACK_ERROR_IO);
     }
     let file_size_raw = unsafe { ftell(file) };
-    if file_size_raw < 0 {
-        return Err(MPACK_ERROR_IO);
-    }
     if unsafe { fseek(file, 0, SEEK_SET) } != 0 {
         return Err(MPACK_ERROR_IO);
     }
-    let file_size = file_size_raw as usize;
-    let read_size = if max_bytes == 0 {
-        file_size
-    } else {
-        file_size.min(max_bytes)
+    let file_size = match crate::node::check_file_tree_bytes(file_size_raw, max_bytes) {
+        Ok(size) => size,
+        Err(crate::common::Error::Invalid) => return Err(MPACK_ERROR_INVALID),
+        Err(crate::common::Error::TooBig) => return Err(MPACK_ERROR_TOO_BIG),
+        Err(_) => return Err(MPACK_ERROR_IO),
     };
-    let mut buf = vec![0u8; read_size];
-    if read_size > 0 {
-        let read = unsafe { fread(buf.as_mut_ptr().cast(), 1, read_size, file) };
-        if read != read_size {
-            return Err(MPACK_ERROR_IO);
-        }
+    let mut buf = vec![0u8; file_size];
+    let read = unsafe { fread(buf.as_mut_ptr().cast(), 1, file_size, file) };
+    if read != file_size {
+        return Err(MPACK_ERROR_IO);
     }
     Ok(buf)
 }

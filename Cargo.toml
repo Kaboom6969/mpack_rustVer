@@ -85,5 +85,9 @@ path = "tests/port/expect_core.rs"
 name = "node_api"
 path = "tests/port/node_api.rs"
 
+[[test]]
+name = "node_ffi_file"
+path = "tests/port/node_ffi_file.rs"
+
 [build-dependencies]
 cc = { version = "1.4.0", optional = true }

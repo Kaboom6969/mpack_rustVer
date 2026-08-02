@@ -77,6 +77,8 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | `Tree::parse` nesting | Iterative heap stack (+ `possible_nodes`-style remaining-byte reserve) | Matches C iterative parse; depth-1200 suite case must not blow the Rust stack. Absurd compound counts → `Error::Invalid`. |
 | `Tree::size` / `parse_with_limits` | Expose consumed byte count; optional `max_nodes` → `TooBig` | Needed for `mpack_tree_size`, multi-message re-parse, and `init_pool` overflow. |
 | Node C ABI under `full-suite-abi` | Real FFI in `src/ffi/node.rs` with side-table keyed by tree pointer | C owns `mpack_tree_t` / `mpack_node_t`; Rust graph + heap/pool ABI slots live off-struct (writer-builder pattern). Optional/contains/enum/dup-key/narrow/widen/utf8/copy/alloc/print/stream stay FFI-only. |
+| File init empty / oversize | Empty file → `invalid`; `max_bytes != 0` and size > max → `too_big` (no silent truncate) | Matches C `mpack_file_tree_read`. |
+| `tree.max_size` enforcement | Stream fill caps `owned_data` growth; do **not** reject `data_length > max_size` on parse of a preloaded buffer | C `max_size` is max **message** / fill accumulation, not whole multi-message buffer length. |
 
 ## Technical decisions (hotspots)
 
