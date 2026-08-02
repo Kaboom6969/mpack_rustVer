@@ -63,6 +63,8 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Decision | Choice | Why |
 | --- | --- | --- |
 | Safe-core shape | Free functions on `&mut Reader<'_>`; `ExpectCompound { is_nil, count }` for `*_or_nil` | Mirrors `mpack_expect_*(reader)` without a second parser; FFI can map to C `(bool, *count)` without inventing another shape. |
+| `nil` / `bool` / true/false | Type-byte path (`read_native_u8`), matching C `mpack_expect_type_byte` | Avoids full `read_tag` on truncated ext markers (would sticky `Invalid` instead of C's `Type`). |
+| `float_range` / `double_range` | Reject with C's `val < min \|\| val > max` | IEEE NaN bounds: C's comparisons are false so NaN bounds do not reject; `>= && <=` would. |
 | Rust keywords | `r#bool` / `r#str`; `true_` / `false_` | Locked names for C `mpack_expect_bool` / `mpack_expect_str` / true/false expects. |
 | Allocator-backed expects | Stay in FFI only (`*_alloc`, `char*` copies) | Safe core must not return allocator-owned pointers; teammates fill `src/expect.rs` bodies only. |
 | Expect C ABI under `full-suite-abi` | `src/ffi/expect.rs` (replaces stubs) | Reuses Reader `read_with_core` / `ensure_*`; scalar paths via `expect_op!`; `*_alloc` stay FFI-only (`test_malloc` + `mpack_read_bytes_alloc_impl`). Gate: `test-expect.c` 0 failures under `--everything`. |
@@ -139,14 +141,18 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Decision | Choice | Why |
 | --- | --- | --- |
 | Tooling | `cargo-fuzz` / libFuzzer under Linux or WSL (`fuzz/`) | Coverage-guided; matches Port Mortem “differential fuzzer” intent better than shelling out per input. |
-| C oracle | Compile `original_c/.../mpack-{common,platform,reader,node}.c` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C decoder as a separate object set. |
+| C oracle | Compile `original_c/.../mpack-{common,platform,reader,writer,expect,node}.c` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C implementation as a separate object set. |
 | Rust side | `mpack` with `default-features = false` (Cargo feature `ffi` off) | Avoids `#[no_mangle]` clashes between Rust FFI and original C `mpack_*` symbols. Default builds keep `ffi` enabled. |
 | Embed / FFI tests | Frozen-link embed path passes `--features ffi`; FFI port tests use `required-features = ["ffi"]` (or `full-suite-abi`) | Do not rely on `default = ["ffi"]` alone — `--no-default-features` must not silently drop `mpack_*` from the embed cdylib. |
-| Targets (v1) | `reader_diff`, `node_diff`, `total_diff` | Mirror upstream AFL `fuzz.c` surfaces (reader + node); `total_diff` runs both digests on the same input. Expect / writer / FFI crash targets deferred. |
-| Digest | Sticky error + packed tag records (type/aux/scalar/FNV-1a payload); depth cap 1024; raw bytes only (no UTF-8 checks) | Same walk on both sides; avoids known UTF-8 cursor divergence and recursive `discard` stack risk. |
+| Targets | `reader_diff`, `node_diff`, `total_diff`, `expect_diff`, `writer_diff` in `fuzz/`; `ffi_crash` in `fuzz_ffi/` | Reader/node/total digests; expect opcode digest; writer read→rewrite transfer; FFI crash-only package (no C oracle — avoids symbol clash). Driver: `python3 fuzz/run_all.py`. |
+| Expect input | First byte = ops length; ops drive `mpack_expect_*`; remainder = MessagePack payload | Expect is schema-typed; unstructured MessagePack alone cannot exercise the surface. |
+| Expect error codes | Non-zero sticky errors collapsed to `1` in digests; op walk stops at first sticky error | C type-byte expects often flag `Type` where safe-core `read_tag` flags `Invalid` on truncated markers; success-path records still compared exactly. |
+| Writer transfer | Growable rewrite of one top-level value (depth ≤ 1024); compare reader/writer sticky errors + emitted bytes | Mirrors upstream AFL `fuzz.c` transfer path without Expect/Builder. |
+| FFI crash package | Separate `fuzz_ffi/` with `full-suite-abi`, no C oracle objects | Differential fuzz must keep Rust `#[no_mangle]` off; crash harness needs the port’s C ABI exports. |
+| Digest | Sticky error + packed tag records (type/aux/scalar/FNV-1a payload); depth cap 1024; raw bytes only (no UTF-8 checks) | Same walk on both sides; avoids known UTF-8 cursor divergence and recursive `discard` stack risk. Expect records store opcode/ok/value/hash. On sticky error, `bytes_used = 0`. |
 | `bytes_used` on error | Cleared to 0 in both digests when sticky error ≠ ok | C may consume partial payload bytes before flagging invalid; safe-core often stops earlier. Structure + error remain compared (intentional weakening for cursor noise). |
 | libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
-| Evidence | Optional `fuzz/log.txt` after timed clean runs | Documents smoke; not a substitute for frozen-suite module gates. |
+| Evidence | Optional `fuzz/log.txt` after timed clean runs; `fuzz/run_all.py` for sequential coverage | Documents smoke; not a substitute for frozen-suite module gates. |
 
 ## Upstream C findings (suite / fuzz only)
 

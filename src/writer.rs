@@ -404,12 +404,32 @@ impl GrowableWriter {
         self.encode(|writer| writer.write_i64(value));
     }
 
+    pub fn write_f32(&mut self, value: f32) {
+        self.encode(|writer| writer.write_f32(value));
+    }
+
+    pub fn write_f64(&mut self, value: f64) {
+        self.encode(|writer| writer.write_f64(value));
+    }
+
     pub fn write_array_header(&mut self, count: usize) {
         self.encode(|writer| writer.write_array_header(count));
     }
 
     pub fn write_map_header(&mut self, count: usize) {
         self.encode(|writer| writer.write_map_header(count));
+    }
+
+    pub fn write_str_header(&mut self, length: usize) {
+        self.encode(|writer| writer.write_str_header(length));
+    }
+
+    pub fn write_bin_header(&mut self, length: usize) {
+        self.encode(|writer| writer.write_bin_header(length));
+    }
+
+    pub fn write_ext_header(&mut self, ext_type: i8, length: usize) {
+        self.encode(|writer| writer.write_ext_header(ext_type, length));
     }
 
     pub fn write_str(&mut self, value: &[u8]) {
@@ -429,6 +449,11 @@ impl GrowableWriter {
 
     pub fn write_timestamp(&mut self, seconds: i64, nanoseconds: u32) {
         self.encode(|writer| writer.write_timestamp(seconds, nanoseconds));
+    }
+
+    /// Append raw payload bytes after a prior `write_*_header` (or equivalent).
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        self.append(bytes);
     }
 
     fn append(&mut self, bytes: &[u8]) {

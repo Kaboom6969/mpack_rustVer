@@ -5,5 +5,8 @@
 pub mod digest;
 pub mod ffi;
 
-pub use digest::{node_digest_rust, reader_digest_rust, Digest, MAX_INPUT_LEN};
-pub use ffi::{node_digest_c, reader_digest_c};
+pub use digest::{
+    expect_digest_rust, node_digest_rust, reader_digest_rust, writer_transfer_rust, Digest,
+    WriterTransfer, MAX_INPUT_LEN,
+};
+pub use ffi::{expect_digest_c, node_digest_c, reader_digest_c, writer_transfer_c};

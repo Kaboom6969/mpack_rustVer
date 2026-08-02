@@ -77,18 +77,20 @@ The image builds the crate and runs `cargo test` as the runnable smoke artifact.
 
 ## Differential fuzz (WSL / Linux)
 
-Compare original C MPack against the Rust safe core with cargo-fuzz:
+Compare original C MPack against the Rust safe core with cargo-fuzz, plus an
+FFI crash harness:
 
 ```bash
 rustup toolchain install nightly
 cargo +nightly install cargo-fuzz
 # If default c++ is Clang, prefer: CXX=g++ RUSTFLAGS="-C linker=g++"
+python3 fuzz/run_all.py --seconds 60
+# or one target:
 cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
-cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_len=65536
 ```
 
-See [`fuzz/README.md`](fuzz/README.md) for oracle details, symbol policy,
-linker pitfalls, and corpus layout.
+See [`fuzz/README.md`](fuzz/README.md) for the full target table, oracle
+details, symbol policy, linker pitfalls, and corpus layout.
 
 ## Status
 

@@ -1,0 +1,22 @@
+[package]
+name = "mpack-fuzz-ffi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mpack = { path = "..", features = ["full-suite-abi"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "ffi_crash"
+path = "fuzz_targets/ffi_crash.rs"
+doc = false
+test = false
+bench = false

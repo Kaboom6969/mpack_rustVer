@@ -157,19 +157,21 @@ pub fn double_strict(reader: &mut Reader<'_>) -> Option<f64> {
 
 pub fn float_range(reader: &mut Reader<'_>, min_value: f32, max_value: f32) -> Option<f32> {
     let value = float(reader)?;
-    if value >= min_value && value <= max_value {
-        Some(value)
-    } else {
+    // Match C: reject with `val < min || val > max` (NaN comparisons are false,
+    // so NaN bounds do not reject — same as mpack_expect_float_range).
+    if value < min_value || value > max_value {
         type_error(reader)
+    } else {
+        Some(value)
     }
 }
 
 pub fn double_range(reader: &mut Reader<'_>, min_value: f64, max_value: f64) -> Option<f64> {
     let value = double(reader)?;
-    if value >= min_value && value <= max_value {
-        Some(value)
-    } else {
+    if value < min_value || value > max_value {
         type_error(reader)
+    } else {
+        Some(value)
     }
 }
 
@@ -190,18 +192,19 @@ pub fn int_match(reader: &mut Reader<'_>, value: i64) -> bool {
 }
 
 pub fn nil(reader: &mut Reader<'_>) -> bool {
-    match reader.read_tag() {
-        Some(Tag::Nil) => true,
+    match reader.read_native_u8() {
+        Some(0xc0) => true,
         Some(_) => fail_bool(reader),
         None => false,
     }
 }
 
 pub fn r#bool(reader: &mut Reader<'_>) -> Option<bool> {
-    match reader.read_tag()? {
-        Tag::Bool(value) => Some(value),
-        _ => type_error(reader),
+    let type_byte = reader.read_native_u8()?;
+    if type_byte & !1 != 0xc2 {
+        return type_error(reader);
     }
+    Some(type_byte & 1 != 0)
 }
 
 pub fn true_(reader: &mut Reader<'_>) -> bool {
@@ -511,6 +514,15 @@ pub fn tag(reader: &mut Reader<'_>, expected: Tag) -> bool {
 }
 
 fn tags_equal(left: Tag, right: Tag) -> bool {
+    // Match C `mpack_tag_cmp`: non-negative ints compare as uint.
+    let normalize = |tag: Tag| -> Tag {
+        match tag {
+            Tag::Int(value) if value >= 0 => Tag::Uint(value as u64),
+            other => other,
+        }
+    };
+    let left = normalize(left);
+    let right = normalize(right);
     match (left, right) {
         (Tag::Nil, Tag::Nil) => true,
         (Tag::Bool(a), Tag::Bool(b)) => a == b,
