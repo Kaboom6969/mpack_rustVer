@@ -10,26 +10,17 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::common::Error;
 use crate::ffi::guard::catch_ffi_panic;
+use crate::ffi::suite_libc::{
+    suite_fclose, suite_fopen, suite_free, suite_fwrite, suite_malloc, suite_realloc,
+    OWNED_BUFFER_CAPACITY,
+};
 use crate::ffi::types::{
     core_error_to_abi, MpackError, MpackTag, MpackWriter, MPACK_ERROR_BUG, MPACK_OK,
 };
 use crate::writer::Writer;
 
-const OWNED_BUFFER_CAPACITY: usize = 4096;
-
-unsafe extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-    fn realloc(pointer: *mut c_void, size: usize) -> *mut c_void;
-    fn free(pointer: *mut c_void);
-    fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
-    fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
-    fn fclose(file: *mut c_void) -> c_int;
-}
-
 #[cfg(feature = "full-suite-abi")]
 unsafe extern "C" {
-    fn test_malloc(size: usize) -> *mut c_void;
-    fn test_free(pointer: *mut c_void);
     fn test_strlen(value: *const c_char) -> usize;
 }
 
@@ -37,48 +28,15 @@ unsafe extern "C" {
 /// active C ABI. Under the frozen everything suite the caller receives this
 /// buffer and frees it through `MPACK_FREE`, so it must come from `test_malloc`.
 unsafe fn growable_alloc(size: usize) -> *mut c_void {
-    #[cfg(feature = "full-suite-abi")]
-    {
-        unsafe { test_malloc(size) }
-    }
-    #[cfg(not(feature = "full-suite-abi"))]
-    {
-        unsafe { malloc(size) }
-    }
+    unsafe { suite_malloc(size) }
 }
 
 unsafe fn growable_realloc(pointer: *mut c_void, used: usize, size: usize) -> *mut c_void {
-    #[cfg(feature = "full-suite-abi")]
-    {
-        // `MPACK_REALLOC` is not configured for the frozen suite. Mirror
-        // MPack's platform fallback: allocate through MPACK_MALLOC, copy the
-        // initialized prefix, then release through MPACK_FREE.
-        let replacement = unsafe { test_malloc(size) };
-        if replacement.is_null() {
-            return ptr::null_mut();
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(pointer.cast::<u8>(), replacement.cast::<u8>(), used);
-            test_free(pointer);
-        }
-        replacement
-    }
-    #[cfg(not(feature = "full-suite-abi"))]
-    {
-        let _ = used;
-        unsafe { realloc(pointer, size) }
-    }
+    unsafe { suite_realloc(pointer, used, size) }
 }
 
 unsafe fn growable_free(pointer: *mut c_void) {
-    #[cfg(feature = "full-suite-abi")]
-    {
-        unsafe { test_free(pointer) };
-    }
-    #[cfg(not(feature = "full-suite-abi"))]
-    {
-        unsafe { free(pointer) };
-    }
+    unsafe { suite_free(pointer) };
 }
 
 struct GrowableContext {
@@ -837,7 +795,7 @@ pub unsafe extern "C" fn mpack_writer_init_filename(
     }
     if catch_ffi_panic(|| {
         // SAFETY: `filename` is a NUL-terminated C string and the mode is static.
-        let file = unsafe { fopen(filename, c"wb".as_ptr()) };
+        let file = unsafe { suite_fopen(filename, c"wb".as_ptr()) };
         if file.is_null() {
             // SAFETY: The writer destination is writable.
             unsafe { writer.write(MpackWriter::error_state(crate::ffi::types::MPACK_ERROR_IO)) };
@@ -1425,13 +1383,13 @@ fn builder_complete(writer: *mut MpackWriter, kind: BuildKind) {
 }
 
 fn init_file_writer(writer: *mut MpackWriter, file: *mut c_void, close_when_done: bool) {
-    // SAFETY: C malloc returns a writable allocation or null.
-    let buffer = unsafe { malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
+    // SAFETY: Suite/ABI malloc returns a writable allocation or null.
+    let buffer = unsafe { suite_malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
     if buffer.is_null() {
         if close_when_done {
             // SAFETY: The caller supplied a live FILE pointer.
             unsafe {
-                fclose(file);
+                suite_fclose(file);
             }
         }
         // SAFETY: The caller supplied writable writer storage.
@@ -1519,24 +1477,33 @@ unsafe extern "C" fn growable_teardown(writer: *mut MpackWriter) {
     let context = unsafe { Box::from_raw(state.context.cast::<GrowableContext>()) };
     let used = state.position as usize - state.buffer as usize;
     if state.error == MPACK_OK {
-        // Preserve C MPack's non-null result for an empty successful message.
-        let wanted = used.max(1);
-        // SAFETY: The buffer came from the matching ABI allocator.
-        let resized =
-            unsafe { growable_realloc(state.buffer.cast::<c_void>(), used, wanted).cast::<c_char>() };
-        if resized.is_null() {
-            // SAFETY: Free the original allocation after resize failure.
-            unsafe { growable_free(state.buffer.cast::<c_void>()) };
-            state.buffer = ptr::null_mut();
-            flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_MEMORY);
-        } else {
-            // SAFETY: Result pointers remain live through destroy by contract.
-            unsafe {
-                context.target_data.write(resized);
-                context.target_size.write(used);
+        // Match C `mpack_growable_writer_teardown`: only shrink when the buffer
+        // is less than half full; otherwise hand off the existing allocation.
+        let capacity = state.end as usize - state.buffer as usize;
+        if used < capacity / 2 {
+            let wanted = used.max(1);
+            // SAFETY: The buffer came from the matching ABI allocator.
+            let resized = unsafe {
+                growable_realloc(state.buffer.cast::<c_void>(), used, wanted).cast::<c_char>()
+            };
+            if resized.is_null() {
+                // SAFETY: Free the original allocation after resize failure.
+                unsafe { growable_free(state.buffer.cast::<c_void>()) };
+                state.buffer = ptr::null_mut();
+                flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_MEMORY);
+                state.context = ptr::null_mut();
+                return;
             }
-            state.buffer = ptr::null_mut();
+            state.buffer = resized;
+            state.position = resized.wrapping_add(used);
+            state.end = resized.wrapping_add(wanted);
         }
+        // SAFETY: Result pointers remain live through destroy by contract.
+        unsafe {
+            context.target_data.write(state.buffer);
+            context.target_size.write(used);
+        }
+        state.buffer = ptr::null_mut();
     } else if !state.buffer.is_null() {
         // SAFETY: The buffer came from the matching ABI allocator.
         unsafe { growable_free(state.buffer.cast::<c_void>()) };
@@ -1556,7 +1523,7 @@ unsafe extern "C" fn file_flush(
     // SAFETY: The callback is installed only with this context type.
     let context = unsafe { &*((*writer).context.cast::<FileContext>()) };
     // SAFETY: `data` has `count` bytes and context contains a live FILE pointer.
-    if unsafe { fwrite(data.cast::<c_void>(), 1, count, context.file) } != count {
+    if unsafe { suite_fwrite(data.cast::<c_void>(), 1, count, context.file) } != count {
         flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_IO);
     }
 }
@@ -1570,49 +1537,16 @@ unsafe extern "C" fn file_teardown(writer: *mut MpackWriter) {
     let context = unsafe { Box::from_raw(state.context.cast::<FileContext>()) };
     if context.close_when_done {
         // SAFETY: The context owns the live FILE pointer.
-        if unsafe { fclose(context.file) } != 0 {
+        if unsafe { suite_fclose(context.file) } != 0 {
             flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_IO);
         }
     }
     if !state.buffer.is_null() {
-        // SAFETY: The buffer came from C malloc.
-        unsafe { free(state.buffer.cast::<c_void>()) };
+        // SAFETY: The buffer came from suite_malloc / MPACK_MALLOC.
+        unsafe { suite_free(state.buffer.cast::<c_void>()) };
     }
     state.buffer = ptr::null_mut();
     state.context = ptr::null_mut();
-}
-
-/// Suite symbols required when linking the `full-suite-abi` cdylib under `cargo test`.
-/// Frozen-link builds without `cfg(test)` and supplies these from the C suite.
-#[cfg(all(test, feature = "full-suite-abi"))]
-mod suite_test_shims {
-    use std::alloc::{alloc_zeroed, Layout};
-    use std::ffi::c_void;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
-
-    #[no_mangle]
-    pub unsafe extern "C" fn test_malloc(size: usize) -> *mut c_void {
-        let layout = Layout::from_size_align(size.max(1), 8).unwrap();
-        unsafe { alloc_zeroed(layout) }.cast()
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn test_free(pointer: *mut c_void) {
-        let _ = pointer;
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn test_strlen(value: *const i8) -> usize {
-        if value.is_null() {
-            return 0;
-        }
-        unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes().len()
-    }
 }
 
 #[cfg(all(test, feature = "full-suite-abi"))]
@@ -1654,7 +1588,7 @@ mod growable_track_init_tests {
         // SAFETY: NUL-terminated literals; creates/truncates a private temp path.
         let path = c"mpack_writer_track_init_fail.tmp";
         let mode = c"wb+";
-        unsafe { fopen(path.as_ptr(), mode.as_ptr()) }
+        unsafe { suite_fopen(path.as_ptr(), mode.as_ptr()) }
     }
 
     #[test]
@@ -1693,9 +1627,9 @@ mod growable_track_init_tests {
                 assert!((*writer).buffer.is_null());
                 // Caller still owns FILE*; fwrite proves it was not closed by teardown.
                 let byte: u8 = b'x';
-                let written = fwrite((&byte as *const u8).cast(), 1, 1, file);
+                let written = suite_fwrite((&byte as *const u8).cast(), 1, 1, file);
                 assert_eq!(written, 1);
-                assert_eq!(fclose(file), 0);
+                assert_eq!(suite_fclose(file), 0);
             }
         });
     }

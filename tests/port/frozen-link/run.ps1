@@ -57,12 +57,17 @@ if ($FullSuite) {
     if ($Release) {
         $CargoArguments += "--release"
     }
-    $CargoArguments += @("--features", "full-suite-abi", "--crate-type", "staticlib")
+    $CargoArguments += @(
+        "--features", "full-suite-abi",
+        "--crate-type", "staticlib",
+        "--", "--cfg", "mpack_frozen_link"
+    )
 } else {
-    $CargoArguments = @("build", "--target", $RustTarget)
+    $CargoArguments = @("rustc", "--target", $RustTarget)
     if ($Release) {
         $CargoArguments += "--release"
     }
+    $CargoArguments += @("--crate-type", "cdylib")
 }
 & $Cargo @CargoArguments
 if ($LASTEXITCODE -ne 0) {

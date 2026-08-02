@@ -9,27 +9,6 @@ use mpack::ffi::types::{
     MpackTrackElement, MpackTree, MpackTreeParser, MpackWriter,
 };
 
-/// Suite provides these under frozen-link; cargo tests need local shims.
-#[no_mangle]
-pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
-
-#[no_mangle]
-pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
-
-#[no_mangle]
-pub unsafe extern "C" fn test_malloc(size: usize) -> *mut std::ffi::c_void {
-    let layout = std::alloc::Layout::from_size_align(size.max(1), 8).unwrap();
-    unsafe { std::alloc::alloc_zeroed(layout) }.cast()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn test_free(pointer: *mut std::ffi::c_void) {
-    if pointer.is_null() {
-        return;
-    }
-    let _ = pointer;
-}
-
 #[test]
 fn full_suite_tag_layout() {
     assert_eq!(size_of::<MpackTag>(), 16);
