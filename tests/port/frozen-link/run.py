@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Build frozen MPack C tests against the Rust library without altering them."""
+"""Build frozen MPack C tests against the Rust library without altering them.
+
+Parity gate: acceptance is the frozen suite binary's own exit code and its
+printed ``Unit testing complete. N failures`` line. This runner only builds,
+links, and forwards — it must not rewrite a failing suite into success.
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +41,10 @@ EVERYTHING_DEFINES = [
     "MPACK_FREE=test_free",
     "MPACK_STDIO=1",
 ]
+
+SUMMARY_RE = re.compile(
+    r"Unit testing complete\.\s+(\d+)\s+failures\s+in\s+(\d+)\s+checks\."
+)
 
 
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -98,7 +108,7 @@ def c_command(
     *,
     config_include: Path,
     debug: bool,
-    wrap_abort: bool = False,
+    soft_continue: bool = False,
     extra_defines: list[str] | None = None,
     link_static: bool = False,
 ) -> list[str]:
@@ -141,27 +151,29 @@ def c_command(
         "-o",
         str(output),
     ]
-    if wrap_abort:
-        # Redirect abort() to a returning function so TEST_EARLY_EXIT fall-through
-        # remains defined under GCC's noreturn assumptions for libc abort.
-        # Also quiet printf spam from soft-continued assertion loops.
+    if soft_continue:
+        # Debug-only: redirect abort() so TEST_EARLY_EXIT fall-through remains
+        # defined under GCC noreturn assumptions, and quiet printf spam.
+        # Must not be used as the parity acceptance path.
         adapter_c = Path(__file__).resolve().parent / "c"
         command.insert(3, f"-include{adapter_c / 'soft_abort.h'}")
         command.insert(4, f"-include{adapter_c / 'quiet_printf.h'}")
     if not link_static:
         command.append("-Wl,-rpath," + str(library.parent))
     else:
-        # Header inlines from mpack-platform.c and Rust #[no_mangle] exports can
-        # overlap; keep the C definitions (sources precede the archive).
+        # Retained only for staticlib + mpack-platform.c vs Rust #[no_mangle]
+        # overlap. Prefer fixing duplicate exports over widening this flag.
+        # Documented risk: silent wrong-definition selection.
         command.extend(["-Wl,--allow-multiple-definition"])
         command.extend(native_static_libs())
     return command
 
 
-def prepare_full_suite_extras(sources: list[Path]) -> None:
+def prepare_full_suite_extras(sources: list[Path], *, soft_continue: bool) -> None:
     sources.append(Path(__file__).parent / "c" / "full_layout_check.c")
-    sources.append(Path(__file__).parent / "c" / "soft_abort.c")
-    sources.append(Path(__file__).parent / "c" / "quiet_printf.c")
+    if soft_continue:
+        sources.append(Path(__file__).parent / "c" / "soft_abort.c")
+        sources.append(Path(__file__).parent / "c" / "quiet_printf.c")
     ctor = BUILD / "full_layout_ctor.c"
     ctor.write_text(
         "int mpack_full_layout_check(void);\n"
@@ -196,22 +208,101 @@ def ensure_unit_test_data_link() -> None:
     link.symlink_to(target, target_is_directory=True)
 
 
+def suite_verdict(returncode: int, stdout: str, *, soft_continue: bool) -> int:
+    """Map suite process output to a runner exit code.
+
+    Acceptance data comes from the C suite itself: its exit status and the
+    ``Unit testing complete`` line it prints. Soft-continue never turns a
+    failing suite into success.
+    """
+    match = SUMMARY_RE.search(stdout)
+    if match:
+        failures = int(match.group(1))
+        checks = int(match.group(2))
+        print(
+            f"Frozen suite summary (from C harness): "
+            f"{failures} failures in {checks} checks "
+            f"(process exit={returncode}"
+            f"{'; soft-continue' if soft_continue else ''})."
+        )
+        if failures != 0:
+            # Suite already returns EXIT_FAILURE; force non-zero if somehow 0.
+            return returncode if returncode != 0 else 1
+        if returncode != 0:
+            print(
+                "Summary reports 0 failures but process exit is non-zero; "
+                "forwarding suite exit.",
+                file=sys.stderr,
+            )
+            return returncode
+        return 0
+
+    # No summary: typical when TEST_EARLY_EXIT aborts before main returns.
+    if returncode < 0 or returncode >= 128:
+        print(
+            "Frozen suite aborted/crashed before summary "
+            f"(exit={returncode}); treating as failure."
+        )
+        return 1 if returncode == 0 else returncode
+    if returncode != 0:
+        print(
+            "Frozen suite exited without a Unit testing complete summary "
+            f"(exit={returncode}); treating as failure."
+        )
+        return returncode
+    print(
+        "Frozen suite exit 0 but missing Unit testing complete summary; "
+        "treating as failure.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def run_suite_executable(executable: Path, *, soft_continue: bool) -> int:
+    completed = subprocess.run(
+        [str(executable)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+        if not completed.stdout.endswith("\n"):
+            sys.stdout.write("\n")
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+        if not completed.stderr.endswith("\n"):
+            sys.stderr.write("\n")
+    return suite_verdict(completed.returncode, completed.stdout or "", soft_continue=soft_continue)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Link and run frozen MPack C tests against the Rust library. "
+            "Parity success = suite exit 0 and '0 failures' in the C summary."
+        )
+    )
     parser.add_argument(
         "--full",
         action="store_true",
-        help="compile every frozen unit source (expected to have unresolved symbols until writer parity)",
+        help=(
+            "compile every frozen unit source under tests/original "
+            "(without this flag only frozen_nil_smoke.c runs — not the suite)"
+        ),
     )
     parser.add_argument(
         "--expect-missing",
         action="store_true",
-        help="treat the current full-suite unresolved-symbol result as a successful checkpoint",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--everything",
         action="store_true",
-        help="C everything config (reader/expect/node/stdio/compat/extensions) with full-suite-abi stubs",
+        help=(
+            "C everything config (reader/expect/node/stdio/compat/extensions) "
+            "with full-suite-abi; parity gate requires 0 failures"
+        ),
     )
     parser.add_argument(
         "--default-config",
@@ -219,17 +310,31 @@ def main() -> int:
         help="alias for --everything (kept for older docs/scripts)",
     )
     parser.add_argument(
+        "--soft-continue",
+        action="store_true",
+        help=(
+            "DEBUG ONLY: soft-abort + quiet printf so the suite continues past "
+            "TEST_EARLY_EXIT and prints a full failure summary. Still forwards "
+            "the suite exit / failure count — never a fake green. Not parity."
+        ),
+    )
+    parser.add_argument(
         "--release", action="store_true", help="build the Rust library in release mode"
     )
     args = parser.parse_args()
 
-    if args.expect_missing and not args.full:
-        parser.error("--expect-missing requires --full")
+    if args.expect_missing:
+        parser.error(
+            "--expect-missing is removed: an incomplete link must fail. "
+            "Unresolved symbols are not a successful checkpoint."
+        )
     if args.everything and args.default_config:
         parser.error("use only one of --everything / --default-config")
     full_suite = args.everything or args.default_config
     if full_suite and not args.full:
         parser.error("--everything / --default-config requires --full")
+    if args.soft_continue and not full_suite:
+        parser.error("--soft-continue requires --full --everything (or --default-config)")
 
     if full_suite:
         # Build only the staticlib: a Windows cdylib cannot leave suite symbols
@@ -294,68 +399,28 @@ def main() -> int:
         executable = BUILD / f"{config_name}-{profile}-nil-smoke"
     sources.append(ROOT / "original_c" / "mpack-develop" / "src" / "mpack" / "mpack-platform.c")
 
+    soft_continue = bool(args.soft_continue)
     if full_suite:
-        prepare_full_suite_extras(sources)
+        prepare_full_suite_extras(sources, soft_continue=soft_continue)
         ensure_unit_test_data_link()
 
-    print(
-        "+",
-        " ".join(
-            map(
-                str,
-                c_command(
-                    sources,
-                    executable,
-                    library,
-                    config_include=config_include,
-                    debug=debug,
-                    wrap_abort=full_suite,
-                    extra_defines=extra_defines,
-                    link_static=link_static,
-                ),
-            )
-        ),
+    cmd = c_command(
+        sources,
+        executable,
+        library,
+        config_include=config_include,
+        debug=debug,
+        soft_continue=soft_continue,
+        extra_defines=extra_defines,
+        link_static=link_static,
     )
-    result = subprocess.run(
-        c_command(
-            sources,
-            executable,
-            library,
-            config_include=config_include,
-            debug=debug,
-            wrap_abort=full_suite,
-            extra_defines=extra_defines,
-            link_static=link_static,
-        ),
-        cwd=ROOT,
-    )
+    print("+", " ".join(map(str, cmd)))
+    result = subprocess.run(cmd, cwd=ROOT)
     if result.returncode:
-        if args.expect_missing:
-            print(
-                "Full frozen-suite link is incomplete as expected: "
-                "Rust writer symbols remain to be implemented."
-            )
-            return 0
         return result.returncode
 
     if args.full:
-        # Full-suite stubs are expected to fail many assertions; success means
-        # the binary linked and ran to completion (printed the failure summary).
-        completed = subprocess.run([str(executable)], cwd=ROOT)
-        if full_suite:
-            # Python reports fatal signals as 128+N on Linux.
-            if completed.returncode < 0 or completed.returncode >= 128:
-                print(
-                    "Everything frozen suite crashed "
-                    f"(exit={completed.returncode}); treating as failure."
-                )
-                return 1
-            print(
-                "Everything frozen suite finished "
-                f"(exit={completed.returncode}; assertion failures expected with stubs)."
-            )
-            return 0
-        return completed.returncode
+        return run_suite_executable(executable, soft_continue=soft_continue)
     run([str(executable)])
     return 0
 

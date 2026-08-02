@@ -1,6 +1,9 @@
 /*
- * Force-included under --everything / --default-config only.
+ * Force-included only under frozen-link `--soft-continue` (debug).
+ *
+ * Parity / acceptance builds must NOT include this header.
  * Redirect printf so soft-continued assertion spam does not dominate runtime.
+ * Does not change pass/fail counters; still not a substitute for parity.
  *
  * Include <stdio.h> before remapping printf/vprintf so libc declarations are
  * processed under their real names (include guards), then redirect call sites.
