@@ -19,7 +19,7 @@ layer so the frozen unit suite in `tests/original/` can link unchanged.
 | `original_c/` | Reference C sources (unchanged) |
 | `tests/original/` | Frozen C unit suite (do not edit) |
 | `tests/port/` | New Rust-side tests |
-| `fuzz/` | Differential fuzzer template |
+| `fuzz/` | Differential fuzz (C oracle vs Rust safe core; WSL/Linux + cargo-fuzz) |
 | `bench/` | Benchmark methodology and results |
 | `.port-mortem.toml` | Track, source URL, kickoff hashes |
 | `Dockerfile` | One-command buildable artifact |
@@ -74,6 +74,21 @@ docker run --rm mpack-rust
 ```
 
 The image builds the crate and runs `cargo test` as the runnable smoke artifact.
+
+## Differential fuzz (WSL / Linux)
+
+Compare original C MPack against the Rust safe core with cargo-fuzz:
+
+```bash
+rustup toolchain install nightly
+cargo +nightly install cargo-fuzz
+# If default c++ is Clang, prefer: CXX=g++ RUSTFLAGS="-C linker=g++"
+cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
+cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_len=65536
+```
+
+See [`fuzz/README.md`](fuzz/README.md) for oracle details, symbol policy,
+linker pitfalls, and corpus layout.
 
 ## Status
 

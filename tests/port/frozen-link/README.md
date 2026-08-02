@@ -45,6 +45,10 @@ Compiles every frozen unit source with the explicit `embed-writer`
 configuration from `tests/port/ffi-harness/include/`. Green when the C harness
 prints `0 failures` and the process exits 0 (matching C `embed-writer-release`).
 
+Embed-writer builds Rust with an explicit `--features ffi` (not relying on
+Cargo `default = ["ffi"]`), so `--no-default-features` or an empty default
+feature set cannot silently drop `mpack_*` exports from the cdylib.
+
 ## Everything parity gate (`--everything`)
 
 To link and run the frozen suite under the upstream **everything** configuration

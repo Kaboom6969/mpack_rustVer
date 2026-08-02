@@ -383,7 +383,7 @@ def main() -> int:
             cargo_command.extend(["--target", RUST_TARGET])
         if args.release:
             cargo_command.append("--release")
-        cargo_command.extend(["--crate-type", "cdylib"])
+        cargo_command.extend(["--features", "ffi", "--crate-type", "cdylib"])
     run(cargo_command)
     BUILD.mkdir(parents=True, exist_ok=True)
     output = rust_output(args.release)

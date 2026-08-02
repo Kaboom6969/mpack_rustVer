@@ -14,15 +14,18 @@ name = "mpack"
 crate-type = ["rlib"]
 
 [features]
-default = []
-ffi-harness = ["dep:cc"]
+default = ["ffi"]
+# C-ABI `#[no_mangle]` exports under `src/ffi/`. Disable for differential fuzz so
+# original C MPack symbols can link without colliding with the Rust FFI layer.
+ffi = []
+ffi-harness = ["dep:cc", "ffi"]
 # Full frozen-suite ABI (COMPATIBILITY/EXTENSIONS/tracking/builder/reader/node).
 # Mutually exclusive at the layout level with the default embed-writer ABI.
 # Used by frozen-link --everything (C everything) and --default-config.
 # Frozen-link builds this feature as `cargo rustc --crate-type staticlib` so
 # suite symbols (test_malloc / mpack_assert_fail) resolve at final executable link.
 # Pass `--cfg mpack_frozen_link` so Rust does not emit cargo-test suite shims.
-full-suite-abi = []
+full-suite-abi = ["ffi"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mpack_frozen_link)'] }
@@ -40,6 +43,7 @@ path = "tests/port/writer_core.rs"
 [[test]]
 name = "writer_configs"
 path = "tests/port/writer_configs.rs"
+required-features = ["ffi"]
 
 [[test]]
 name = "reader_core"

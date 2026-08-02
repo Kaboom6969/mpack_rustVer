@@ -81,7 +81,7 @@ if ($EverythingMode) {
     if ($Release) {
         $CargoArguments += "--release"
     }
-    $CargoArguments += @("--crate-type", "cdylib")
+    $CargoArguments += @("--features", "ffi", "--crate-type", "cdylib")
 }
 & $Cargo @CargoArguments
 if ($LASTEXITCODE -ne 0) {

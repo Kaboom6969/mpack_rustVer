@@ -9,6 +9,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Keep `original_c/` at repo root | Keep (not relocated) | Reference sources + differential builds without disturbing kickoff layout already in the repo. |
 | Original tests path | `tests/original/` | Port Mortem layout; tree hashed at kickoff (see `.port-mortem.toml`). **Do not modify.** |
 | New tests | `tests/port/` | Rust unit/integration tests that are not part of the frozen C suite. |
+| Differential fuzz | `fuzz/` (cargo-fuzz; C oracle vs safe core) | Optional parity finder; does not replace frozen-suite module gates. |
 | Dual-layer design | Safe Rust core + C ABI FFI | Passes original C tests without rewriting them; keeps idiomatic Rust for maintainability. |
 | Module map | `src/{common,writer,reader,expect,node}.rs` + `src/ffi/` | Mirrors C dependency order (common → writer/reader → expect → node). Safe modules stay `forbid(unsafe_code)`; raw pointers live only under `src/ffi/`. |
 | Public C headers / inlines | Upstream MPack headers; `mpack-platform.c` for header-inline ABI | Accessors such as `mpack_writer_error()` / buffer helpers stay C inline / platform TU. Rust does not re-export them. |
@@ -130,6 +131,20 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 - **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node stays the minimal locked `Tree` / `Node` list. Allocation and C string copies stay in `src/ffi/`.
 - **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; gate `test-node.c` under `--everything`.
 - **Signature changes** to locked safe-core exports require lead approval and a row in the Expect / Node tables above.
+
+## Differential fuzz (C oracle vs safe core)
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Tooling | `cargo-fuzz` / libFuzzer under Linux or WSL (`fuzz/`) | Coverage-guided; matches Port Mortem “differential fuzzer” intent better than shelling out per input. |
+| C oracle | Compile `original_c/.../mpack-{common,platform,reader,node}.c` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C decoder as a separate object set. |
+| Rust side | `mpack` with `default-features = false` (Cargo feature `ffi` off) | Avoids `#[no_mangle]` clashes between Rust FFI and original C `mpack_*` symbols. Default builds keep `ffi` enabled. |
+| Embed / FFI tests | Frozen-link embed path passes `--features ffi`; FFI port tests use `required-features = ["ffi"]` (or `full-suite-abi`) | Do not rely on `default = ["ffi"]` alone — `--no-default-features` must not silently drop `mpack_*` from the embed cdylib. |
+| Targets (v1) | `reader_diff`, `node_diff` | Mirror upstream AFL `fuzz.c` surfaces (reader + node); Expect / writer / FFI crash targets deferred. |
+| Digest | Sticky error + packed tag records (type/aux/scalar/FNV-1a payload); depth cap 1024; raw bytes only (no UTF-8 checks) | Same walk on both sides; avoids known UTF-8 cursor divergence and recursive `discard` stack risk. |
+| `bytes_used` on error | Cleared to 0 in both digests when sticky error ≠ ok | C may consume partial payload bytes before flagging invalid; safe-core often stops earlier. Structure + error remain compared (intentional weakening for cursor noise). |
+| libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
+| Evidence | Optional `fuzz/log.txt` after timed clean runs | Documents smoke; not a substitute for frozen-suite module gates. |
 
 ## Explicit non-goals (for now)
 
