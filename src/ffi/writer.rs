@@ -900,7 +900,12 @@ pub unsafe extern "C" fn mpack_write_object_bytes(
     data: *const c_char,
     count: usize,
 ) {
-    write_c_bytes(writer, data, count, write_raw_buffered);
+    write_c_bytes(writer, data, count, |writer, bytes| {
+        // C `mpack_write_object_bytes`: track_element (incl. builder) then native.
+        builder_record_value(writer);
+        writer_track_element(writer);
+        write_raw_buffered(writer, bytes);
+    });
 }
 
 /// Writes an MPack object header represented by `mpack_tag_t`.
@@ -1438,18 +1443,9 @@ fn init_file_writer(writer: *mut MpackWriter, file: *mut c_void, close_when_done
         return;
     }
     let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
+    // Match C `mpack_writer_init_stdfile`: track_init may sticky-error but the
+    // buffer is kept and flush/teardown (plus FILE context) are always wired.
     initialize_writer_tracking(&mut state);
-    if state.error != MPACK_OK {
-        // SAFETY: This private file buffer came from libc.
-        unsafe { free(buffer.cast()) };
-        if close_when_done {
-            // SAFETY: The caller supplied a live FILE pointer.
-            unsafe { fclose(file) };
-        }
-        // SAFETY: The caller supplied writable writer storage.
-        unsafe { writer.write(state) };
-        return;
-    }
     let context = Box::new(FileContext {
         file,
         close_when_done,
@@ -1622,34 +1618,126 @@ mod suite_test_shims {
 #[cfg(all(test, feature = "full-suite-abi"))]
 mod growable_track_init_tests {
     use super::*;
-    use crate::ffi::force_track_init_fail_for_tests;
-    use crate::ffi::types::MPACK_ERROR_MEMORY;
+    use crate::ffi::{with_forced_track_init_fail, with_track_test_serial};
+    use crate::ffi::types::{MPACK_ERROR_BUG, MPACK_ERROR_MEMORY};
     use std::mem::MaybeUninit;
 
     #[test]
     fn growable_track_init_failure_keeps_buffer_and_destroy_is_safe() {
-        force_track_init_fail_for_tests(true);
-        let mut writer = MaybeUninit::<MpackWriter>::uninit();
-        let mut data: *mut c_char = ptr::null_mut();
-        let mut size = 0_usize;
-        unsafe {
-            mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
-            let writer = writer.as_mut_ptr();
-            assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
-            assert!(
-                !(*writer).buffer.is_null(),
-                "track fail must not free buffer early"
-            );
-            assert!(
-                (*writer).teardown.is_some(),
-                "teardown must stay wired for reclaim"
-            );
-            assert!(data.is_null());
-            assert_eq!(size, 0);
-            assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
-            assert!(data.is_null());
-            assert_eq!(size, 0);
-            assert!((*writer).buffer.is_null());
-        }
+        with_forced_track_init_fail(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(
+                    !(*writer).buffer.is_null(),
+                    "track fail must not free buffer early"
+                );
+                assert!(
+                    (*writer).teardown.is_some(),
+                    "teardown must stay wired for reclaim"
+                );
+                assert!(data.is_null());
+                assert_eq!(size, 0);
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!(data.is_null());
+                assert_eq!(size, 0);
+                assert!((*writer).buffer.is_null());
+            }
+        });
+    }
+
+    fn open_temp_file() -> *mut c_void {
+        // SAFETY: NUL-terminated literals; creates/truncates a private temp path.
+        let path = c"mpack_writer_track_init_fail.tmp";
+        let mode = c"wb+";
+        unsafe { fopen(path.as_ptr(), mode.as_ptr()) }
+    }
+
+    #[test]
+    fn file_track_init_failure_close_true_keeps_buffer_and_destroy_is_safe() {
+        with_forced_track_init_fail(|| {
+            let file = open_temp_file();
+            assert!(!file.is_null());
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            unsafe {
+                mpack_writer_init_stdfile(writer.as_mut_ptr(), file, true);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(!(*writer).buffer.is_null());
+                assert!((*writer).teardown.is_some());
+                assert!(!((*writer).context.is_null()));
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!((*writer).buffer.is_null());
+                assert!((*writer).context.is_null());
+            }
+        });
+    }
+
+    #[test]
+    fn file_track_init_failure_close_false_does_not_close_file() {
+        with_forced_track_init_fail(|| {
+            let file = open_temp_file();
+            assert!(!file.is_null());
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            unsafe {
+                mpack_writer_init_stdfile(writer.as_mut_ptr(), file, false);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(!(*writer).buffer.is_null());
+                assert!((*writer).teardown.is_some());
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!((*writer).buffer.is_null());
+                // Caller still owns FILE*; fwrite proves it was not closed by teardown.
+                let byte: u8 = b'x';
+                let written = fwrite((&byte as *const u8).cast(), 1, 1, file);
+                assert_eq!(written, 1);
+                assert_eq!(fclose(file), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn object_bytes_counts_as_tracked_element() {
+        with_track_test_serial(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            let nil = [0xc0_u8];
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                mpack_start_array(writer, 1);
+                mpack_write_object_bytes(writer, nil.as_ptr().cast(), nil.len());
+                mpack_writer_track_pop(writer, 9); // mpack_type_array
+                assert_eq!(mpack_writer_destroy(writer), MPACK_OK);
+                assert!(!data.is_null());
+                assert_eq!(size, 2); // fixarray(1) + nil
+                growable_free(data.cast());
+            }
+        });
+    }
+
+    #[test]
+    fn object_bytes_without_expected_element_flags_bug() {
+        with_track_test_serial(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            let nil = [0xc0_u8];
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                mpack_start_array(writer, 0);
+                mpack_write_object_bytes(writer, nil.as_ptr().cast(), nil.len());
+                assert_eq!((*writer).error, MPACK_ERROR_BUG);
+                mpack_writer_track_pop(writer, 9);
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_BUG);
+                assert!(data.is_null());
+            }
+        });
     }
 }

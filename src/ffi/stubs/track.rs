@@ -3,6 +3,7 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use crate::ffi::types::{
     MpackError, MpackTrack, MpackTrackElement, MPACK_ERROR_BUG, MPACK_ERROR_MEMORY, MPACK_OK,
@@ -13,8 +14,34 @@ const TRACKING_INITIAL_CAPACITY: usize = 8;
 /// When set, the next `track_init` returns `mpack_error_memory` without allocating.
 /// Consumed (cleared) on use. Port / unit tests only.
 static FORCE_TRACK_INIT_FAIL: AtomicBool = AtomicBool::new(false);
+static TRACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn track_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TRACK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serialize tests that touch `track_init` so a forced-fail flag cannot be stolen.
+#[doc(hidden)]
+pub fn with_track_test_serial<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = track_test_lock();
+    f()
+}
+
+/// Test hook: run `f` with the next `track_init` forced to fail (serialized).
+#[doc(hidden)]
+pub fn with_forced_track_init_fail<R>(f: impl FnOnce() -> R) -> R {
+    with_track_test_serial(|| {
+        FORCE_TRACK_INIT_FAIL.store(true, Ordering::SeqCst);
+        let result = f();
+        FORCE_TRACK_INIT_FAIL.store(false, Ordering::SeqCst);
+        result
+    })
+}
 
 /// Test hook: force the next `track_init` to fail with memory error.
+/// Prefer [`with_forced_track_init_fail`] when tests may run in parallel.
 #[doc(hidden)]
 pub fn force_track_init_fail_for_tests(force: bool) {
     FORCE_TRACK_INIT_FAIL.store(force, Ordering::SeqCst);
