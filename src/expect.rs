@@ -345,10 +345,22 @@ pub fn array_max_or_nil(reader: &mut Reader<'_>, max_count: u32) -> Option<Expec
 }
 
 pub fn r#str(reader: &mut Reader<'_>) -> Option<u32> {
-    match reader.read_tag()? {
-        Tag::Str(length) => Some(length),
-        _ => type_error(reader),
-    }
+    // Match C `mpack_expect_str` when `!MPACK_OPTIMIZE_FOR_SIZE`: type-byte path
+    // so a truncated non-str marker (e.g. int32 `0xd2` with 2 leftover bytes)
+    // sticky-errors as `Type`, not `Invalid` from a full `read_tag`.
+    let type_byte = reader.read_native_u8()?;
+    let count = if type_byte >> 5 == 5 {
+        u32::from(type_byte & !0xe0)
+    } else if type_byte == 0xd9 {
+        u32::from(reader.read_native_u8()?)
+    } else if type_byte == 0xda {
+        u32::from(reader.read_native_u16()?)
+    } else if type_byte == 0xdb {
+        reader.read_native_u32()?
+    } else {
+        return type_error(reader);
+    };
+    Some(count)
 }
 
 fn copy_bytes(dst: &mut [u8], src: &[u8]) -> Option<usize> {

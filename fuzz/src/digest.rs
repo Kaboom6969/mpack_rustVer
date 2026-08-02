@@ -878,9 +878,6 @@ pub fn expect_digest_rust(data: &[u8]) -> Digest {
     out.bytes_used = reader.used() as u32;
     out.error = error_to_c(reader.error());
     if out.error != 0 {
-        // C type-byte expects often sticky-`Type` where full `read_tag` sticky-
-        // `Invalid` on truncated markers. Compare error presence, not the code.
-        out.error = 1;
         out.bytes_used = 0;
     }
     out

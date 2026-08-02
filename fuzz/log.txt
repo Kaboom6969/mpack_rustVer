@@ -60,7 +60,11 @@ python3 fuzz/run_all.py --seconds 15
   fuzz/writer_diff: ok
   fuzz_ffi/ffi_crash: ok
 
+# Short smoke for new targets (not comparable duration to reader/node 60–300s rows above).
 expect_diff  -max_total_time=30 -max_len=65536: Done ~1.6M runs; 0 crashes
 writer_diff  -max_total_time=20 -max_len=65536: Done ~38k runs; 0 crashes
-ffi_crash    -max_total_time=20 -detect_leaks=0: Done ~260k runs; 0 crashes
+ffi_crash    -max_total_time=20 (LSan on): Done ~260k runs; 0 crashes
 ```
+
+Fairness follow-up: expect sticky errors compared precisely (no collapse);
+`r#str` type-byte aligned with C; `ffi_crash` LSan enabled under real fuzzing `test_free`.

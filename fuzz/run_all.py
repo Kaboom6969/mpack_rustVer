@@ -5,7 +5,7 @@ Requires Linux/WSL with nightly Rust and cargo-fuzz (see fuzz/README.md).
 
 Targets (in order):
   fuzz/:       reader_diff, node_diff, total_diff, expect_diff, writer_diff
-  fuzz_ffi/:   ffi_crash  (runs with -detect_leaks=0; suite test_free is a noop)
+  fuzz_ffi/:   ffi_crash  (crash-only smoke; LSan on — fuzzing cfg pairs calloc/free)
 
 Examples:
   python3 fuzz/run_all.py
@@ -85,15 +85,6 @@ def main() -> int:
             cmd.append(f"-max_total_time={args.seconds}")
         if args.runs is not None:
             cmd.append(f"-runs={args.runs}")
-        # Prefer env ASAN_OPTIONS for LSan; libFuzzer -detect_leaks=0 alone
-        # still prints end-of-run leak summaries under AddressSanitizer.
-        if name == "ffi_crash":
-            cmd.append("-detect_leaks=0")
-            asan = env.get("ASAN_OPTIONS", "")
-            if "detect_leaks=" not in asan:
-                env["ASAN_OPTIONS"] = (
-                    (asan + ":detect_leaks=0").strip(':') if asan else "detect_leaks=0"
-                )
 
         print("=" * 72)
         print(f"+ {' '.join(cmd)}")

@@ -4,8 +4,8 @@
 //! read / expect / node / destroy calls on stack buffers. Unwinding panics fail
 //! the target; sticky ABI errors are expected and ignored.
 //!
-//! Fixed-buffer writer only (growable uses suite `test_free` noop under cargo
-//! test shims and would leak across libFuzzer iterations).
+//! Fixed-buffer writer only (narrow crash surface). Under `cfg(fuzzing)`,
+//! `suite_libc` pairs `test_malloc` with a real `test_free`, so LSan can stay on.
 
 #![no_main]
 

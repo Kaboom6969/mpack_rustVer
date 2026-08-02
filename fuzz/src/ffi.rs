@@ -115,14 +115,6 @@ fn split_expect_input(data: &[u8]) -> (&[u8], &[u8]) {
     (&rest[..split], &rest[split..])
 }
 
-fn normalize_expect_digest(mut digest: Digest) -> Digest {
-    if digest.error != 0 {
-        digest.error = 1;
-        digest.bytes_used = 0;
-    }
-    digest
-}
-
 /// C-oracle expect opcode digest.
 pub fn expect_digest_c(data: &[u8]) -> Digest {
     let (ops, payload) = split_expect_input(data);
@@ -142,5 +134,9 @@ pub fn expect_digest_c(data: &[u8]) -> Digest {
             &mut raw,
         );
     }
-    normalize_expect_digest(from_c(raw))
+    let mut digest = from_c(raw);
+    if digest.error != 0 {
+        digest.bytes_used = 0;
+    }
+    digest
 }

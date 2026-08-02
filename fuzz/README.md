@@ -16,14 +16,17 @@
 | `total_diff` | `fuzz` | Same input: both reader and node digests must match C vs Rust |
 | `expect_diff` | `fuzz` | Opcode stream + MessagePack payload → `mpack_expect_*` digest |
 | `writer_diff` | `fuzz` | Read→rewrite growable transfer (mirrors upstream AFL `fuzz.c`) |
-| `ffi_crash` | `fuzz_ffi` | Opcode-driven FFI init/write/read/expect/node/destroy (crash only) |
+| `ffi_crash` | `fuzz_ffi` | Opcode-driven FFI init/write/read/expect/node/destroy (**crash smoke only**, no C oracle / not parity) |
 
 Depth is capped at 1024 (aligned with upstream `test/fuzz/fuzz.c`). Reader/node
 digests record sticky error, tag records (type / aux / scalar / payload FNV-1a),
 and `bytes_used` **only on success** (truncated cursor advancement is normalized
-away — see `DECISIONS.md`). The node oracle walk is recursive at that depth
-limit; extreme nesting can overflow the fuzz worker stack (reliability of the
-harness, not a production ABI claim).
+away — see `DECISIONS.md`). Expect digests compare **precise** sticky error codes
+(and may exercise UTF-8 expects). The C oracle builds with
+`MPACK_READ/WRITE_TRACKING=0`, so writer transfer does not cover `done_*`.
+`ffi_crash` is crash smoke only (no C oracle). The node oracle walk is recursive
+at that depth limit; extreme nesting can overflow the fuzz worker stack
+(reliability of the harness, not a production ABI claim).
 
 ## Requirements (WSL / Linux)
 

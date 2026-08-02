@@ -1038,6 +1038,21 @@ fn str__happy_reads_fixstr_and_str8_headers() {
 }
 
 #[test]
+fn str__non_str_type_byte_flags_type_even_when_truncated() {
+    // C type-byte expect_str: int32 marker 0xd2 with only 2 trailing bytes still
+    // flags Type (does not attempt a full read_tag → Invalid).
+    let mut truncated_int = Reader::new(&[0xD2, 0xB4, 0x00]);
+    assert_eq!(expect::r#str(&mut truncated_int), None);
+    assert_eq!(truncated_int.error(), Error::Type);
+    assert_eq!(truncated_int.used(), 1);
+
+    let mut complete_bool = Reader::new(&[0xC3]);
+    assert_eq!(expect::r#str(&mut complete_bool), None);
+    assert_eq!(complete_bool.error(), Error::Type);
+    assert_eq!(complete_bool.used(), 1);
+}
+
+#[test]
 fn str_buf__happy_copies_bytes_and_zero_length() {
     let mut buf = [0xAA; 4];
     let mut reader = Reader::new(&[0xA3, b'a', b'b', b'c']);
