@@ -142,7 +142,18 @@ fn tag_length(tag: &MpackTag) -> u32 {
     (tag.value & u32::MAX as u64) as u32
 }
 
-fn remaining_bytes(state: &MpackReader) -> Option<usize> {
+/// Borrows C reader storage after the ABI entry has null-checked `reader`.
+///
+/// # Safety
+///
+/// `reader` must be non-null and point to uniquely writable `mpack_reader_t`
+/// storage for the duration of the returned borrow.
+unsafe fn borrow_reader<'a>(reader: *mut MpackReader) -> &'a mut MpackReader {
+    // SAFETY: Caller upholds the null/liveness contract above.
+    unsafe { &mut *reader }
+}
+
+fn remaining_of(state: &MpackReader) -> Option<usize> {
     if state.data.is_null() && state.end.is_null() {
         return Some(0);
     }
@@ -157,29 +168,49 @@ fn remaining_bytes(state: &MpackReader) -> Option<usize> {
     Some(end - data)
 }
 
-fn flag_error_impl(reader: *mut MpackReader, error: MpackError) {
-    if reader.is_null() || error == MPACK_OK {
-        return;
+fn data_slice(state: &MpackReader) -> Option<&[u8]> {
+    let remaining = remaining_of(state)?;
+    if remaining == 0 {
+        return Some(&[]);
     }
-    let state = unsafe { &mut *reader };
-    if state.error != MPACK_OK {
+    // SAFETY: `remaining_of` validated `data..end` as a live contiguous range.
+    Some(unsafe { slice::from_raw_parts(state.data.cast::<u8>(), remaining) })
+}
+
+fn advance(state: &mut MpackReader, count: usize) {
+    state.data = state.data.wrapping_add(count);
+}
+
+fn flag_error_on(state: &mut MpackReader, reader: *mut MpackReader, error: MpackError) {
+    if error == MPACK_OK || state.error != MPACK_OK {
         return;
     }
     state.error = error;
     state.end = state.data;
     if let Some(error_fn) = state.error_fn {
+        // SAFETY: `reader` is the live C object `state` borrows; callback may
+        // re-enter only through the documented MPack error-handler contract.
         unsafe { error_fn(reader, error) };
     }
+}
+
+fn flag_error_impl(reader: *mut MpackReader, error: MpackError) {
+    if reader.is_null() || error == MPACK_OK {
+        return;
+    }
+    // SAFETY: Non-null reader points at writable C storage.
+    let state = unsafe { borrow_reader(reader) };
+    flag_error_on(state, reader, error);
 }
 
 fn flag_bug(reader: *mut MpackReader) {
     if reader.is_null() {
         return;
     }
-    unsafe {
-        (*reader).error = MPACK_ERROR_BUG;
-        (*reader).end = (*reader).data;
-    }
+    // SAFETY: Non-null reader points at writable C storage.
+    let state = unsafe { borrow_reader(reader) };
+    state.error = MPACK_ERROR_BUG;
+    state.end = state.data;
 }
 
 fn initialize_as_bug(reader: *mut MpackReader) {
@@ -188,30 +219,34 @@ fn initialize_as_bug(reader: *mut MpackReader) {
     }
     let mut state = empty_reader();
     state.error = MPACK_ERROR_BUG;
+    // SAFETY: Non-null destination is writable `mpack_reader_t` storage.
     unsafe {
         reader.write(state);
     }
 }
 
 fn fill_range(reader: *mut MpackReader, destination: *mut c_char, min_bytes: usize, max_bytes: usize) -> usize {
-    let state = unsafe { &*reader };
+    // SAFETY: Internal callers pass a live non-null reader.
+    let state = unsafe { borrow_reader(reader) };
     let Some(fill) = state.fill else {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return 0;
     };
     if min_bytes == 0 || max_bytes < min_bytes {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return 0;
     }
 
     let mut count = 0usize;
     while count < min_bytes {
+        // SAFETY: fill callback and destination buffer come from the C reader contract.
         let read = unsafe { fill(reader, destination.wrapping_add(count), max_bytes - count) };
-        if unsafe { (*reader).error } != MPACK_OK {
+        let state = unsafe { borrow_reader(reader) };
+        if state.error != MPACK_OK {
             return 0;
         }
         if read == 0 || read == usize::MAX {
-            flag_error_impl(reader, MPACK_ERROR_IO);
+            flag_error_on(state, reader, MPACK_ERROR_IO);
             return 0;
         }
         count += read;
@@ -220,18 +255,18 @@ fn fill_range(reader: *mut MpackReader, destination: *mut c_char, min_bytes: usi
 }
 
 fn ensure_impl(reader: *mut MpackReader, count: usize) -> bool {
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
         return false;
     }
-    let Some(left) = remaining_bytes(state) else {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return false;
     };
     if count <= left {
         return true;
     }
-    unsafe { mpack_reader_ensure_straddle(reader, count) }
+    ensure_straddle_impl(reader, count)
 }
 
 fn header_size_for_marker(marker: u8) -> usize {
@@ -250,7 +285,8 @@ fn ensure_tag_header(reader: *mut MpackReader) -> bool {
     if !ensure_impl(reader, 1) {
         return false;
     }
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
+    // SAFETY: ensure(1) established at least one readable byte at `data`.
     let marker = unsafe { *state.data.cast::<u8>() };
     let needed = header_size_for_marker(marker).min(MAXIMUM_TAG_SIZE + 1);
     ensure_impl(reader, needed)
@@ -261,90 +297,96 @@ fn read_with_core<T>(
     mut operation: impl FnMut(&mut Reader<'_>) -> T,
     on_error: impl FnOnce() -> T,
 ) -> T {
-    let state = unsafe { &mut *reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
         return on_error();
     }
-    let Some(remaining) = remaining_bytes(state) else {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+    let Some(remaining) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return on_error();
     };
+    // Copy the raw cursor before building the temporary slice so `state` is
+    // not considered borrowed across the safe-core call.
+    let data_ptr = state.data.cast::<u8>();
     let input = if remaining == 0 {
         &[][..]
     } else {
-        unsafe { slice::from_raw_parts(state.data.cast::<u8>(), remaining) }
+        // SAFETY: `remaining_of` validated the live data..end range.
+        unsafe { slice::from_raw_parts(data_ptr, remaining) }
     };
     let mut core = Reader::new(input);
     let result = operation(&mut core);
     let used = core.used();
+    let error = core_error_to_abi(core.error());
+    drop(core);
     if used > remaining {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return on_error();
     }
-    state.data = state.data.wrapping_add(used);
-    let error = core_error_to_abi(core.error());
+    advance(state, used);
     if error != MPACK_OK {
-        flag_error_impl(reader, error);
+        flag_error_on(state, reader, error);
         return on_error();
     }
     result
 }
 
 fn skip_using_fill(reader: *mut MpackReader, mut count: usize) {
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.fill.is_none() {
-        flag_error_impl(reader, MPACK_ERROR_INVALID);
+        flag_error_on(state, reader, MPACK_ERROR_INVALID);
         return;
     }
     let buffer_size = state.size;
     if buffer_size == 0 {
-        flag_error_impl(reader, MPACK_ERROR_IO);
+        flag_error_on(state, reader, MPACK_ERROR_IO);
         return;
     }
+    let buffer = state.buffer;
 
     while count > buffer_size {
-        let buffer = state.buffer;
         if fill_range(reader, buffer, buffer_size, buffer_size) < buffer_size {
             return;
         }
         count -= buffer_size;
     }
 
-    let state = unsafe { &mut *reader };
+    let state = unsafe { borrow_reader(reader) };
     state.data = state.buffer;
     let read = fill_range(reader, state.buffer, count, buffer_size);
-    if unsafe { (*reader).error } != MPACK_OK {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
         return;
     }
     if read < count {
-        flag_error_impl(reader, MPACK_ERROR_IO);
+        flag_error_on(state, reader, MPACK_ERROR_IO);
         return;
     }
-    let state = unsafe { &mut *reader };
     state.end = state.buffer.wrapping_add(read);
     state.data = state.buffer.wrapping_add(count);
 }
 
 fn skip_bytes_straddle(reader: *mut MpackReader, count: usize) {
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.fill.is_none() {
-        flag_error_impl(reader, MPACK_ERROR_INVALID);
+        flag_error_on(state, reader, MPACK_ERROR_INVALID);
         return;
     }
 
-    let left = remaining_bytes(state).unwrap_or(0);
+    let left = remaining_of(state).unwrap_or(0);
     let mut remaining = count;
     if left > remaining {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return;
     }
     remaining -= left;
-    let state = unsafe { &mut *reader };
     state.data = state.end;
 
-    let state = unsafe { &*reader };
-    if state.skip.is_some() && state.size > 0 && remaining > state.size / 16 {
-        if let Some(skip) = state.skip {
+    let skip = state.skip;
+    let size = state.size;
+    if skip.is_some() && size > 0 && remaining > size / 16 {
+        if let Some(skip) = skip {
+            // SAFETY: Optional skip callback installed by C.
             unsafe { skip(reader, remaining) };
         }
         return;
@@ -356,48 +398,117 @@ fn read_native(reader: *mut MpackReader, destination: *mut c_char, count: usize)
     if count == 0 {
         return;
     }
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
+        // SAFETY: Caller provides destination writable for `count` bytes.
         unsafe { ptr::write_bytes(destination.cast::<u8>(), 0, count) };
         return;
     }
-    let Some(left) = remaining_bytes(state) else {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         unsafe { ptr::write_bytes(destination.cast::<u8>(), 0, count) };
         return;
     };
     if count <= left {
+        // SAFETY: `left` bytes readable at data; destination has `count` bytes.
         unsafe {
             ptr::copy_nonoverlapping(state.data.cast::<u8>(), destination.cast::<u8>(), count);
-            (*reader).data = state.data.wrapping_add(count);
         }
+        advance(state, count);
         return;
     }
-    unsafe { mpack_read_native_straddle(reader, destination, count) };
+    read_native_straddle_impl(reader, destination, count);
+}
+
+fn skip_bytes_impl(reader: *mut MpackReader, count: usize) {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return;
+    }
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        return;
+    };
+    if left >= count {
+        advance(state, count);
+        return;
+    }
+    skip_bytes_straddle(reader, count);
 }
 
 fn read_bytes_inplace_notrack(reader: *mut MpackReader, count: usize) -> *const c_char {
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
         return ptr::null();
     }
-    let Some(left) = remaining_bytes(state) else {
-        flag_error_impl(reader, MPACK_ERROR_BUG);
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
         return ptr::null();
     };
     if left >= count {
         let bytes = state.data;
-        unsafe { (*reader).data = state.data.wrapping_add(count) };
+        advance(state, count);
         return bytes;
     }
     if !ensure_impl(reader, count) {
         return ptr::null();
     }
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     let bytes = state.data;
-    unsafe { (*reader).data = state.data.wrapping_add(count) };
+    advance(state, count);
     bytes
 }
+
+fn read_tag_impl(reader: *mut MpackReader) -> MpackTag {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return MpackTag::nil();
+    }
+    if !ensure_tag_header(reader) {
+        return MpackTag::nil();
+    }
+    read_with_core(
+        reader,
+        |core| core.read_tag().map(tag_to_abi).unwrap_or_else(MpackTag::nil),
+        MpackTag::nil,
+    )
+}
+
+fn peek_tag_impl(reader: *mut MpackReader) -> MpackTag {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return MpackTag::nil();
+    }
+    if !ensure_tag_header(reader) {
+        return MpackTag::nil();
+    }
+    let state = unsafe { borrow_reader(reader) };
+    let Some(input) = data_slice(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        return MpackTag::nil();
+    };
+    let mut core = Reader::new(input);
+    match core.peek_tag() {
+        Some(tag) => {
+            let error = core_error_to_abi(core.error());
+            if error != MPACK_OK {
+                flag_error_on(state, reader, error);
+                MpackTag::nil()
+            } else {
+                tag_to_abi(tag)
+            }
+        }
+        None => {
+            let error = core_error_to_abi(core.error());
+            if error != MPACK_OK {
+                flag_error_on(state, reader, error);
+            }
+            MpackTag::nil()
+        }
+    }
+}
+
+fn done_type_impl(_reader: *mut MpackReader, _type: c_int) {}
 
 fn init_stdfile_impl(reader: *mut MpackReader, file: *mut c_void, close_when_done: bool) {
     let buffer = unsafe { malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
@@ -489,6 +600,11 @@ unsafe extern "C" fn file_reader_teardown_close(reader: *mut MpackReader) {
 }
 
 /// Initializes a buffered reader over a writable buffer.
+///
+/// # Safety
+///
+/// `reader` must be null or writable storage for one `mpack_reader_t`.
+/// `buffer` must be non-null and writable for `size` bytes when `size > 0`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_init(
     reader: *mut MpackReader,
@@ -500,15 +616,19 @@ pub unsafe extern "C" fn mpack_reader_init(
         return;
     }
     if catch_ffi_panic(|| {
+        if buffer.is_null() {
+            // C asserts on null buffer; fail closed with sticky BUG.
+            unsafe {
+                reader.write(MpackReader::error_state(MPACK_ERROR_BUG));
+            }
+            return;
+        }
         let mut state = empty_reader();
         state.buffer = buffer;
         state.size = size;
         state.data = buffer;
-        state.end = if buffer.is_null() {
-            ptr::null()
-        } else {
-            buffer.wrapping_add(count)
-        };
+        state.end = buffer.wrapping_add(count);
+        // SAFETY: Non-null writer storage for one mpack_reader_t.
         unsafe {
             reader.write(state);
         }
@@ -520,6 +640,10 @@ pub unsafe extern "C" fn mpack_reader_init(
 }
 
 /// Initializes a reader directly in an error state.
+///
+/// # Safety
+///
+/// `reader` must be null or writable storage for one `mpack_reader_t`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_init_error(reader: *mut MpackReader, error: MpackError) {
     if reader.is_null() {
@@ -537,6 +661,11 @@ pub unsafe extern "C" fn mpack_reader_init_error(reader: *mut MpackReader, error
 }
 
 /// Initializes a reader over a contiguous data slice (no fill).
+///
+/// # Safety
+///
+/// `reader` must be null or writable storage for one `mpack_reader_t`.
+/// When `count > 0`, `data` must point at `count` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_init_data(
     reader: *mut MpackReader,
@@ -565,6 +694,11 @@ pub unsafe extern "C" fn mpack_reader_init_data(
 }
 
 /// Opens `filename` and initializes a stdfile reader that owns the FILE.
+///
+/// # Safety
+///
+/// `reader` must be null or writable storage for one `mpack_reader_t`.
+/// `filename` must be a valid C string.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_init_filename(reader: *mut MpackReader, filename: *const c_char) {
     if reader.is_null() {
@@ -593,6 +727,11 @@ pub unsafe extern "C" fn mpack_reader_init_filename(reader: *mut MpackReader, fi
 }
 
 /// Initializes a reader that fills from an existing stdio FILE.
+///
+/// # Safety
+///
+/// `reader` must be null or writable storage for one `mpack_reader_t`.
+/// `stdfile` must be a live `FILE*`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_init_stdfile(
     reader: *mut MpackReader,
@@ -618,6 +757,10 @@ pub unsafe extern "C" fn mpack_reader_init_stdfile(
 }
 
 /// Destroys a reader and returns its sticky error.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader previously initialized by an init API.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_destroy(reader: *mut MpackReader) -> MpackError {
     if reader.is_null() {
@@ -636,6 +779,10 @@ pub unsafe extern "C" fn mpack_reader_destroy(reader: *mut MpackReader) -> Mpack
 }
 
 /// Installs a fill callback (requires a writable buffer of minimum size).
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader with a buffer sized for fill use.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_set_fill(reader: *mut MpackReader, fill: MpackReaderFill) {
     if reader.is_null() {
@@ -660,6 +807,10 @@ pub unsafe extern "C" fn mpack_reader_set_fill(reader: *mut MpackReader, fill: M
 }
 
 /// Installs an optional skip callback.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_set_skip(reader: *mut MpackReader, skip: MpackReaderSkip) {
     if reader.is_null() {
@@ -676,6 +827,10 @@ pub unsafe extern "C" fn mpack_reader_set_skip(reader: *mut MpackReader, skip: M
 }
 
 /// Flags a sticky reader error (first error wins; truncates remaining data).
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_flag_error(reader: *mut MpackReader, error: MpackError) {
     if reader.is_null() {
@@ -687,6 +842,10 @@ pub unsafe extern "C" fn mpack_reader_flag_error(reader: *mut MpackReader, error
 }
 
 /// Returns bytes left in the current window (0 if the reader is in error).
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. `data`, when non-null, must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_remaining(
     reader: *mut MpackReader,
@@ -703,7 +862,7 @@ pub unsafe extern "C" fn mpack_reader_remaining(
             }
             return 0;
         }
-        let Some(remaining) = remaining_bytes(state) else {
+        let Some(remaining) = remaining_of(state) else {
             flag_error_impl(reader, MPACK_ERROR_BUG);
             if !data.is_null() {
                 unsafe { *data = ptr::null() };
@@ -724,24 +883,16 @@ pub unsafe extern "C" fn mpack_reader_remaining(
 }
 
 /// Reads the next MessagePack tag.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live, uniquely writable `mpack_reader_t`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_tag(reader: *mut MpackReader) -> MpackTag {
     if reader.is_null() {
         return MpackTag::nil();
     }
-    match catch_ffi_panic(|| {
-        if unsafe { (*reader).error } != MPACK_OK {
-            return MpackTag::nil();
-        }
-        if !ensure_tag_header(reader) {
-            return MpackTag::nil();
-        }
-        read_with_core(
-            reader,
-            |core| core.read_tag().map(tag_to_abi).unwrap_or_else(MpackTag::nil),
-            MpackTag::nil,
-        )
-    }) {
+    match catch_ffi_panic(|| read_tag_impl(reader)) {
         Ok(tag) => tag,
         Err(_) => {
             flag_bug(reader);
@@ -751,49 +902,16 @@ pub unsafe extern "C" fn mpack_read_tag(reader: *mut MpackReader) -> MpackTag {
 }
 
 /// Peeks the next MessagePack tag without advancing the cursor.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live, uniquely writable `mpack_reader_t`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_peek_tag(reader: *mut MpackReader) -> MpackTag {
     if reader.is_null() {
         return MpackTag::nil();
     }
-    match catch_ffi_panic(|| {
-        if unsafe { (*reader).error } != MPACK_OK {
-            return MpackTag::nil();
-        }
-        if !ensure_tag_header(reader) {
-            return MpackTag::nil();
-        }
-        // Peek must not advance `data`; restore after a throwaway core parse.
-        let state = unsafe { &*reader };
-        let Some(remaining) = remaining_bytes(state) else {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return MpackTag::nil();
-        };
-        let input = if remaining == 0 {
-            &[][..]
-        } else {
-            unsafe { slice::from_raw_parts(state.data.cast::<u8>(), remaining) }
-        };
-        let mut core = Reader::new(input);
-        match core.peek_tag() {
-            Some(tag) => {
-                let error = core_error_to_abi(core.error());
-                if error != MPACK_OK {
-                    flag_error_impl(reader, error);
-                    MpackTag::nil()
-                } else {
-                    tag_to_abi(tag)
-                }
-            }
-            None => {
-                let error = core_error_to_abi(core.error());
-                if error != MPACK_OK {
-                    flag_error_impl(reader, error);
-                }
-                MpackTag::nil()
-            }
-        }
-    }) {
+    match catch_ffi_panic(|| peek_tag_impl(reader)) {
         Ok(tag) => tag,
         Err(_) => {
             flag_bug(reader);
@@ -803,6 +921,10 @@ pub unsafe extern "C" fn mpack_peek_tag(reader: *mut MpackReader) -> MpackTag {
 }
 
 /// Copies `count` bytes from the open str/bin/ext into `p`.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. Non-null `p` must be writable for `count`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_bytes(reader: *mut MpackReader, p: *mut c_char, count: usize) {
     if reader.is_null() {
@@ -822,33 +944,26 @@ pub unsafe extern "C" fn mpack_read_bytes(reader: *mut MpackReader, p: *mut c_ch
 }
 
 /// Skips `count` bytes from the open str/bin/ext.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live, uniquely writable `mpack_reader_t`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_skip_bytes(reader: *mut MpackReader, count: usize) {
     if reader.is_null() {
         return;
     }
-    if catch_ffi_panic(|| {
-        let state = unsafe { &*reader };
-        if state.error != MPACK_OK {
-            return;
-        }
-        let Some(left) = remaining_bytes(state) else {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return;
-        };
-        if left >= count {
-            unsafe { (*reader).data = state.data.wrapping_add(count) };
-            return;
-        }
-        skip_bytes_straddle(reader, count);
-    })
-    .is_err()
-    {
+    if catch_ffi_panic(|| skip_bytes_impl(reader, count)).is_err() {
         flag_bug(reader);
     }
 }
 
 /// Returns an in-place pointer into the reader buffer for `count` bytes.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. The returned pointer is valid only
+/// until the next mutating reader operation.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_bytes_inplace(
     reader: *mut MpackReader,
@@ -867,6 +982,10 @@ pub unsafe extern "C" fn mpack_read_bytes_inplace(
 }
 
 /// In-place UTF-8 read of an open string.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_utf8_inplace(
     reader: *mut MpackReader,
@@ -896,6 +1015,10 @@ pub unsafe extern "C" fn mpack_read_utf8_inplace(
 }
 
 /// Reads bytes and validates UTF-8 into a caller buffer.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. Non-null `p` must be writable for `byte_count`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_utf8(reader: *mut MpackReader, p: *mut c_char, byte_count: usize) {
     if reader.is_null() {
@@ -947,6 +1070,10 @@ fn read_cstr_unchecked(
 }
 
 /// Reads a cstring, rejecting interior NUL bytes.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. `buf` must be writable for `buffer_size`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_cstr(
     reader: *mut MpackReader,
@@ -975,6 +1102,10 @@ pub unsafe extern "C" fn mpack_read_cstr(
 }
 
 /// Reads a UTF-8 cstring, rejecting interior NULs.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. `buf` must be writable for `buffer_size`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_utf8_cstr(
     reader: *mut MpackReader,
@@ -1003,6 +1134,11 @@ pub unsafe extern "C" fn mpack_read_utf8_cstr(
 }
 
 /// Allocates and reads bytes (suite frees via `MPACK_FREE` / `test_free`).
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader. Returned pointer is owned by the
+/// caller and must be freed with the suite allocator when non-null.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
     reader: *mut MpackReader,
@@ -1019,7 +1155,12 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
         if count == 0 && !null_terminated {
             return ptr::null_mut();
         }
-        let size = count + usize::from(null_terminated);
+        // Reject size wrap on 32-bit (e.g. count == usize::MAX with NUL).
+        // Upstream C has the same latent TODO; this port fails closed.
+        let Some(size) = count.checked_add(usize::from(null_terminated)) else {
+            flag_error_impl(reader, MPACK_ERROR_TOO_BIG);
+            return ptr::null_mut();
+        };
         let pointer = unsafe { malloc(size.max(1)).cast::<c_char>() };
         if pointer.is_null() {
             flag_error_impl(reader, MPACK_ERROR_MEMORY);
@@ -1051,12 +1192,24 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
     }
 }
 
-/// Tracking done hook. Tracking is not wired this slice; keep as a no-op so
-/// header inlines (`mpack_done_str` / array / map) do not poison the reader.
+/// Tracking done hook (no-op until read-tracking is wired).
+///
+/// # Safety
+///
+/// `reader` may be null; non-null values must point at a live `mpack_reader_t`.
 #[no_mangle]
-pub unsafe extern "C" fn mpack_done_type(_reader: *mut MpackReader, _type: c_int) {}
+pub unsafe extern "C" fn mpack_done_type(reader: *mut MpackReader, type_: c_int) {
+    if reader.is_null() {
+        return;
+    }
+    done_type_impl(reader, type_);
+}
 
-/// Discards one complete MessagePack object (C-style recursion so fill works).
+/// Discards one complete MessagePack object (iterative; fill-aware).
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live, uniquely writable `mpack_reader_t`.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_discard(reader: *mut MpackReader) {
     if reader.is_null() {
@@ -1068,41 +1221,84 @@ pub unsafe extern "C" fn mpack_discard(reader: *mut MpackReader) {
 }
 
 fn discard_impl(reader: *mut MpackReader) {
-    let tag = unsafe { mpack_read_tag(reader) };
-    if unsafe { (*reader).error } != MPACK_OK {
-        return;
+    // Iterative discard avoids unbounded Rust stack growth on hostile nesting.
+    // Semantics match C's recursive discard (read tag, skip payload / children).
+    enum Frame {
+        Array { left: u32 },
+        Map { left: u32, need_value: bool },
     }
-    match tag.type_ {
-        TYPE_STR | TYPE_BIN | TYPE_EXT => {
-            unsafe { mpack_skip_bytes(reader, tag_length(&tag) as usize) };
-            unsafe { mpack_done_type(reader, tag.type_) };
+    let mut stack: Vec<Frame> = Vec::new();
+    loop {
+        let tag = read_tag_impl(reader);
+        let state = unsafe { borrow_reader(reader) };
+        if state.error != MPACK_OK {
+            return;
         }
-        TYPE_ARRAY => {
-            let count = tag_length(&tag);
-            for _ in 0..count {
-                discard_impl(reader);
-                if unsafe { (*reader).error } != MPACK_OK {
+        match tag.type_ {
+            TYPE_STR | TYPE_BIN | TYPE_EXT => {
+                skip_bytes_impl(reader, tag_length(&tag) as usize);
+                done_type_impl(reader, tag.type_);
+            }
+            TYPE_ARRAY => {
+                let n = tag_length(&tag);
+                if n > 0 {
+                    stack.push(Frame::Array { left: n });
+                    continue;
+                }
+                done_type_impl(reader, TYPE_ARRAY);
+            }
+            TYPE_MAP => {
+                let n = tag_length(&tag);
+                if n > 0 {
+                    stack.push(Frame::Map {
+                        left: n,
+                        need_value: false,
+                    });
+                    continue;
+                }
+                done_type_impl(reader, TYPE_MAP);
+            }
+            _ => {}
+        }
+
+        loop {
+            let Some(frame) = stack.last_mut() else {
+                return;
+            };
+            match frame {
+                Frame::Array { left } => {
+                    *left -= 1;
+                    if *left == 0 {
+                        stack.pop();
+                        done_type_impl(reader, TYPE_ARRAY);
+                        continue;
+                    }
+                    break;
+                }
+                Frame::Map { left, need_value } => {
+                    if !*need_value {
+                        *need_value = true;
+                        break;
+                    }
+                    *need_value = false;
+                    *left -= 1;
+                    if *left == 0 {
+                        stack.pop();
+                        done_type_impl(reader, TYPE_MAP);
+                        continue;
+                    }
                     break;
                 }
             }
-            unsafe { mpack_done_type(reader, TYPE_ARRAY) };
         }
-        TYPE_MAP => {
-            let count = tag_length(&tag);
-            for _ in 0..count {
-                discard_impl(reader);
-                discard_impl(reader);
-                if unsafe { (*reader).error } != MPACK_OK {
-                    break;
-                }
-            }
-            unsafe { mpack_done_type(reader, TYPE_MAP) };
-        }
-        _ => {}
     }
 }
 
 /// Reads a timestamp payload of size 4/8/12 and closes the ext.
+///
+/// # Safety
+///
+/// `reader` must be null or a live reader positioned on an open ext payload.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_timestamp(
     reader: *mut MpackReader,
@@ -1181,7 +1377,123 @@ fn decode_timestamp_payload(bytes: &[u8]) -> Option<Timestamp> {
     }
 }
 
+fn ensure_straddle_impl(reader: *mut MpackReader, count: usize) -> bool {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK || count == 0 {
+        return false;
+    }
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        return false;
+    };
+    if count <= left {
+        return true;
+    }
+    if state.fill.is_none() {
+        flag_error_on(state, reader, MPACK_ERROR_INVALID);
+        return false;
+    }
+    if count > state.size {
+        flag_error_on(state, reader, MPACK_ERROR_TOO_BIG);
+        return false;
+    }
+    if state.buffer.is_null() {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        return false;
+    }
+
+    // SAFETY: left bytes at data are readable; buffer has size bytes writable.
+    unsafe {
+        ptr::copy(state.data.cast::<u8>(), state.buffer.cast::<u8>(), left);
+    }
+    state.data = state.buffer;
+    state.end = state.buffer.wrapping_add(left);
+
+    let buffer = state.buffer;
+    let size = state.size;
+    let read = fill_range(reader, buffer.wrapping_add(left), count - left, size - left);
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return false;
+    }
+    state.end = state.end.wrapping_add(read);
+    true
+}
+
+fn read_native_straddle_impl(reader: *mut MpackReader, p: *mut c_char, count: usize) {
+    if count == 0 {
+        return;
+    }
+    if p.is_null() {
+        flag_error_impl(reader, MPACK_ERROR_BUG);
+        return;
+    }
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
+        return;
+    }
+    let Some(left) = remaining_of(state) else {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
+        return;
+    };
+    if count <= left {
+        flag_error_on(state, reader, MPACK_ERROR_BUG);
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
+        return;
+    }
+    if state.fill.is_none() {
+        flag_error_on(state, reader, MPACK_ERROR_INVALID);
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
+        return;
+    }
+    if state.size == 0 {
+        flag_error_on(state, reader, MPACK_ERROR_IO);
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
+        return;
+    }
+
+    let mut destination = p;
+    let mut needed = count;
+    if left > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(state.data.cast::<u8>(), destination.cast::<u8>(), left);
+        }
+        destination = destination.wrapping_add(left);
+        needed -= left;
+        advance(state, left);
+    }
+
+    let state = unsafe { borrow_reader(reader) };
+    if needed <= state.size / 32 {
+        let buffer = state.buffer;
+        let size = state.size;
+        let read = fill_range(reader, buffer, needed, size);
+        if unsafe { borrow_reader(reader) }.error != MPACK_OK {
+            return;
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(
+                borrow_reader(reader).buffer.cast::<u8>(),
+                destination.cast::<u8>(),
+                needed,
+            );
+        }
+        let state = unsafe { borrow_reader(reader) };
+        state.data = state.buffer.wrapping_add(needed);
+        state.end = state.buffer.wrapping_add(read);
+    } else {
+        fill_range(reader, destination, needed, needed);
+    }
+}
+
 /// Ensures `count` bytes are available, refilling via fill when needed.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live, uniquely writable `mpack_reader_t`
+/// with a valid fill buffer when a fill callback is installed.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_ensure_straddle(
     reader: *mut MpackReader,
@@ -1190,52 +1502,7 @@ pub unsafe extern "C" fn mpack_reader_ensure_straddle(
     if reader.is_null() {
         return false;
     }
-    match catch_ffi_panic(|| {
-        let state = unsafe { &*reader };
-        if state.error != MPACK_OK || count == 0 {
-            return false;
-        }
-        let Some(left) = remaining_bytes(state) else {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return false;
-        };
-        if count <= left {
-            // Straddle path should only be used when data is insufficient.
-            return true;
-        }
-        if state.fill.is_none() {
-            flag_error_impl(reader, MPACK_ERROR_INVALID);
-            return false;
-        }
-        if count > state.size {
-            flag_error_impl(reader, MPACK_ERROR_TOO_BIG);
-            return false;
-        }
-        if state.buffer.is_null() {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return false;
-        }
-
-        unsafe {
-            ptr::copy(state.data.cast::<u8>(), state.buffer.cast::<u8>(), left);
-        }
-        let state = unsafe { &mut *reader };
-        state.data = state.buffer;
-        state.end = state.buffer.wrapping_add(left);
-
-        let read = fill_range(
-            reader,
-            unsafe { (*reader).buffer.wrapping_add(left) },
-            count - left,
-            unsafe { (*reader).size - left },
-        );
-        if unsafe { (*reader).error } != MPACK_OK {
-            return false;
-        }
-        let state = unsafe { &mut *reader };
-        state.end = state.end.wrapping_add(read);
-        true
-    }) {
+    match catch_ffi_panic(|| ensure_straddle_impl(reader, count)) {
         Ok(ok) => ok,
         Err(_) => {
             flag_bug(reader);
@@ -1245,6 +1512,11 @@ pub unsafe extern "C" fn mpack_reader_ensure_straddle(
 }
 
 /// Reads `count` bytes when they straddle the buffer boundary.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a live reader. Non-null `p` must be
+/// writable for `count` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_read_native_straddle(
     reader: *mut MpackReader,
@@ -1254,78 +1526,17 @@ pub unsafe extern "C" fn mpack_read_native_straddle(
     if reader.is_null() {
         return;
     }
-    if catch_ffi_panic(|| {
-        if count == 0 {
-            return;
-        }
-        if p.is_null() {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return;
-        }
-        let state = unsafe { &*reader };
-        if state.error != MPACK_OK {
-            unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
-            return;
-        }
-        let Some(left) = remaining_bytes(state) else {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
-            return;
-        };
-        if count <= left {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
-            return;
-        }
-        if state.fill.is_none() {
-            flag_error_impl(reader, MPACK_ERROR_INVALID);
-            unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
-            return;
-        }
-        if state.size == 0 {
-            flag_error_impl(reader, MPACK_ERROR_IO);
-            unsafe { ptr::write_bytes(p.cast::<u8>(), 0, count) };
-            return;
-        }
-
-        let mut destination = p;
-        let mut needed = count;
-        if left > 0 {
-            unsafe {
-                ptr::copy_nonoverlapping(state.data.cast::<u8>(), destination.cast::<u8>(), left);
-            }
-            destination = destination.wrapping_add(left);
-            needed -= left;
-            unsafe { (*reader).data = state.data.wrapping_add(left) };
-        }
-
-        let state = unsafe { &*reader };
-        if needed <= state.size / 32 {
-            let read = fill_range(reader, state.buffer, needed, state.size);
-            if unsafe { (*reader).error } != MPACK_OK {
-                return;
-            }
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    (*reader).buffer.cast::<u8>(),
-                    destination.cast::<u8>(),
-                    needed,
-                );
-            }
-            let state = unsafe { &mut *reader };
-            state.data = state.buffer.wrapping_add(needed);
-            state.end = state.buffer.wrapping_add(read);
-        } else {
-            fill_range(reader, destination, needed, needed);
-        }
-    })
-    .is_err()
-    {
+    if catch_ffi_panic(|| read_native_straddle_impl(reader, p, count)).is_err() {
         flag_bug(reader);
     }
 }
 
 /// Pretty-prints MessagePack data into a NUL-terminated buffer (debug/stdio).
+///
+/// # Safety
+///
+/// When `buffer_size > 0`, `buffer` must be writable for `buffer_size` bytes.
+/// When `data_size > 0`, `data` must be readable for `data_size` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_print_data_to_buffer(
     data: *const c_char,
@@ -1372,6 +1583,10 @@ pub unsafe extern "C" fn mpack_print_data_to_buffer(
 }
 
 /// Pretty-prints MessagePack data to a stdio FILE (C depth-2 indent + trailing newline).
+///
+/// # Safety
+///
+/// `file` must be a live `FILE*`. When `len > 0`, `data` must be readable for `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_print_data_to_file(
     data: *const c_char,

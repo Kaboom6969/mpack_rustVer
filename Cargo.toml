@@ -73,6 +73,11 @@ path = "tests/port/full_abi_layout.rs"
 required-features = ["full-suite-abi"]
 
 [[test]]
+name = "reader_ffi_safety"
+path = "tests/port/reader_ffi_safety.rs"
+required-features = ["full-suite-abi"]
+
+[[test]]
 name = "expect_core"
 path = "tests/port/expect_core.rs"
 

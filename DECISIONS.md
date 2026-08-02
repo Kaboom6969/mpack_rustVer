@@ -134,13 +134,21 @@ This slice targets `test-reader.c` green under
 
 - Real `init` / `init_data` / `init_error` / `destroy` / `flag_error` /
   `remaining` / `set_fill` / `set_skip`
-- `read_tag` / `peek_tag` / C-style recursive `discard` / `read_bytes` /
+- `read_tag` / `peek_tag` / **iterative** `discard` / `read_bytes` /
   `skip_bytes` / inplace / UTF-8 / cstr / alloc / timestamp helpers
 - `ensure_straddle` / `read_native_straddle` with minimal fill refill
 - `mpack_print_data_to_buffer` via safe-core (JSON-ish / bin hexdump)
 - Minimal `init_stdfile` / `init_filename` (owned 4KiB buffer + fread fill /
   optional fseek skip + teardown) so file EOF loops can reach `mpack_error_eof`
   without hanging the everything suite
+- `mpack_read_bytes_alloc_impl` uses `checked_add` for the optional NUL byte;
+  wrap → sticky `mpack_error_too_big` (stricter than upstream C’s latent
+  overflow TODO on 32-bit). Covered by `tests/port/reader_ffi_safety.rs`.
+- FFI `discard` is **iterative** (heap `Vec` frame stack) rather than C’s
+  recursive call stack, so hostile deep nesting cannot blow the Rust stack.
+  Observable results for well-formed / truncated inputs match C; only the
+  failure mode for extreme depth differs (completes or sticky decode error
+  instead of stack overflow).
 
 Frozen-link scaffolding: `tests/port/frozen-link/run.py` creates a repo-root
 `test` symlink to `tests/original/test` before running the everything suite so
