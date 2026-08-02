@@ -82,11 +82,13 @@ Compare original C MPack against the Rust safe core with cargo-fuzz:
 ```bash
 rustup toolchain install nightly
 cargo +nightly install cargo-fuzz
-cargo +nightly fuzz run reader_diff --fuzz-dir fuzz
-cargo +nightly fuzz run node_diff --fuzz-dir fuzz
+# If default c++ is Clang, prefer: CXX=g++ RUSTFLAGS="-C linker=g++"
+cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
+cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_len=65536
 ```
 
-See [`fuzz/README.md`](fuzz/README.md) for oracle details, symbol policy, and corpus layout.
+See [`fuzz/README.md`](fuzz/README.md) for oracle details, symbol policy,
+linker pitfalls, and corpus layout.
 
 ## Status
 

@@ -43,6 +43,7 @@ path = "tests/port/writer_core.rs"
 [[test]]
 name = "writer_configs"
 path = "tests/port/writer_configs.rs"
+required-features = ["ffi"]
 
 [[test]]
 name = "reader_core"

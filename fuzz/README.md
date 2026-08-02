@@ -16,7 +16,9 @@ In-process libFuzzer targets compare digests from **original C MPack**
 Depth is capped at 1024 (aligned with upstream `test/fuzz/fuzz.c`). Digests
 record sticky error, tag records (type / aux / scalar / payload FNV-1a), and
 `bytes_used` **only on success** (truncated cursor advancement is normalized
-away — see `DECISIONS.md`).
+away — see `DECISIONS.md`). The node oracle walk is recursive at that depth
+limit; extreme nesting can overflow the fuzz worker stack (reliability of the
+harness, not a production ABI claim).
 
 ## Requirements (WSL / Linux)
 
@@ -24,19 +26,37 @@ away — see `DECISIONS.md`).
 - `cargo-fuzz` (`cargo +nightly install cargo-fuzz`)
 - C toolchain + C++ headers for libFuzzer (`g++`, `libstdc++-*-dev`)
 
+### Clang as default `cc` / `c++` (common on this VM)
+
+libFuzzer needs a C++ runtime. When the default `c++` is Clang and cannot find
+libstdc++ cleanly, force GCC’s linker driver (same spirit as the C suite’s
+`CC=gcc` guidance in `AGENTS.md`):
+
+```bash
+export CXX=g++
+export RUSTFLAGS="-C linker=g++"
+cargo +nightly fuzz run reader_diff --fuzz-dir fuzz
+```
+
 ## Run
 
 ```bash
 # from repo root (Linux or WSL)
-cargo +nightly fuzz run reader_diff --fuzz-dir fuzz
-cargo +nightly fuzz run node_diff --fuzz-dir fuzz
+cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
+cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_len=65536
 
-# timed smoke (example)
-cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_total_time=60
+# timed smoke (example); raise -max_len so inputs can reach ORACLE_MAX_INPUT
+cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- \
+  -max_total_time=60 -max_len=65536
 ```
 
+libFuzzer’s default `-max_len` is **4096**, while the oracle caps at
+`ORACLE_MAX_INPUT` / `MAX_INPUT_LEN` (**65536**). Pass `-max_len=65536` when
+you want coverage of the large-input truncation path.
+
 Seeds live under `corpus/reader_diff/` and `corpus/node_diff/`. Artifacts and
-`fuzz/target/` are gitignored.
+`fuzz/target/` are gitignored. Hex-named libFuzzer units under `corpus/` are
+also gitignored; hand-named seeds stay tracked.
 
 ## Layout
 

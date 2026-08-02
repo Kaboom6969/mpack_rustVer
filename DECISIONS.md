@@ -139,9 +139,11 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Tooling | `cargo-fuzz` / libFuzzer under Linux or WSL (`fuzz/`) | Coverage-guided; matches Port Mortem “differential fuzzer” intent better than shelling out per input. |
 | C oracle | Compile `original_c/.../mpack-{common,platform,reader,node}.c` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C decoder as a separate object set. |
 | Rust side | `mpack` with `default-features = false` (Cargo feature `ffi` off) | Avoids `#[no_mangle]` clashes between Rust FFI and original C `mpack_*` symbols. Default builds keep `ffi` enabled. |
+| Embed / FFI tests | Frozen-link embed path passes `--features ffi`; FFI port tests use `required-features = ["ffi"]` (or `full-suite-abi`) | Do not rely on `default = ["ffi"]` alone — `--no-default-features` must not silently drop `mpack_*` from the embed cdylib. |
 | Targets (v1) | `reader_diff`, `node_diff` | Mirror upstream AFL `fuzz.c` surfaces (reader + node); Expect / writer / FFI crash targets deferred. |
 | Digest | Sticky error + packed tag records (type/aux/scalar/FNV-1a payload); depth cap 1024; raw bytes only (no UTF-8 checks) | Same walk on both sides; avoids known UTF-8 cursor divergence and recursive `discard` stack risk. |
-| `bytes_used` on error | Cleared to 0 in both digests when sticky error ≠ ok | C may consume partial payload bytes before flagging invalid; safe-core often stops earlier. Structure + error remain compared. |
+| `bytes_used` on error | Cleared to 0 in both digests when sticky error ≠ ok | C may consume partial payload bytes before flagging invalid; safe-core often stops earlier. Structure + error remain compared (intentional weakening for cursor noise). |
+| libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
 | Evidence | Optional `fuzz/log.txt` after timed clean runs | Documents smoke; not a substitute for frozen-suite module gates. |
 
 ## Explicit non-goals (for now)
