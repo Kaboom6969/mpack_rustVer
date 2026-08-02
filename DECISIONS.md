@@ -74,8 +74,9 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | `as_f32` | `Tag::Float` only (no int/double widen) | Intentional minimal freeze vs full C `mpack_node_float` widening. |
 | Required map lookup miss (`map_uint` / `map_str`) | Flag `Error::Data` | Optional/contains variants are not part of the locked surface. |
 | Duplicate map keys | Not diagnosed | Out of the minimal freeze; C may expose richer diagnostics in some paths. |
-| `Tree::parse` nesting | Recursive `parse_node` | C tree parse is iterative (`mpack-node.c`). Deep nesting can blow the Rust stack (contrast with iterative Reader FFI discard/print). |
-| Node C ABI under `full-suite-abi` | Thin stubs → sticky `unsupported` / nil nodes | Safe core is implemented and covered by `tests/port/node_api.rs`; C `test-node.c` stays red until FFI wraps the tree. |
+| `Tree::parse` nesting | Iterative heap stack (+ `possible_nodes`-style remaining-byte reserve) | Matches C iterative parse; depth-1200 suite case must not blow the Rust stack. Absurd compound counts → `Error::Invalid`. |
+| `Tree::size` / `parse_with_limits` | Expose consumed byte count; optional `max_nodes` → `TooBig` | Needed for `mpack_tree_size`, multi-message re-parse, and `init_pool` overflow. |
+| Node C ABI under `full-suite-abi` | Real FFI in `src/ffi/node.rs` with side-table keyed by tree pointer | C owns `mpack_tree_t` / `mpack_node_t`; Rust graph + heap/pool ABI slots live off-struct (writer-builder pattern). Optional/contains/enum/dup-key/narrow/widen/utf8/copy/alloc/print/stream stay FFI-only. |
 
 ## Technical decisions (hotspots)
 
@@ -98,7 +99,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 - **MPack**: Recursive discard / print on the reader; iterative tree parse in node; depth/stack matter for hostile inputs.
 - **Rust intent**: Prefer heap frame stacks at the FFI reader boundary for hostile depth; match observable results for well-formed / truncated inputs.
-- **Status**: Reader FFI `discard` / `print_data_to_*` are iterative. Safe-core `node::Tree::parse` is still recursive — document before changing either. Extreme nesting on discard/print completes or sticky-errors instead of stack overflow.
+- **Status**: Reader FFI `discard` / `print_data_to_*` are iterative. Safe-core `node::Tree::parse` is iterative (heap frame stack) with a remaining-byte compound reserve. Extreme nesting on discard/print/tree completes or sticky-errors instead of stack overflow.
 
 ### Tracking
 
@@ -110,19 +111,19 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 - **MPack**: Growable writers, `*_alloc` readers, and tree pools use `MPACK_MALLOC`; the suite frees with `MPACK_FREE` (`test_free` under frozen-link).
 - **Rust intent**: Pointers returned to C (reader/expect `*_alloc`, node stubs that return buffers) use `test_malloc` / `test_free`. Library-private buffers freed only inside FFI (file reader owned buffer, track stack, growable writer teardown) may use libc when never handed to suite `MPACK_FREE`. Never hand a Rust-global-allocator block to either free.
-- **Status**: Reader `mpack_read_bytes_alloc_impl` and Expect `*_alloc` / `array_alloc` use suite hooks. Node `*_alloc` stubs already use `test_malloc`. Writer growable still libc (internal destroy).
+- **Status**: Reader `mpack_read_bytes_alloc_impl`, Expect `*_alloc` / `array_alloc`, and Node `*_alloc` use suite hooks (`test_malloc`). Writer growable still libc (internal destroy).
 
 ### Full-suite stubs vs real Reader / Expect FFI
 
 - **MPack**: One implementation for reader / expect / node / track / print.
 - **Rust intent**: Under `full-suite-abi`, replace stubs module-by-module with safe-core calls (do not grow unsafe in stub bodies).
-- **Status**: Reader FFI (`src/ffi/reader.rs`) and Expect FFI (`src/ffi/expect.rs`) are real. Node FFI remains stubs (`stubs/node.rs`). Print helpers used by reader data-print live with reader; write-track stubs stay scaffolding.
+- **Status**: Reader / Expect / Node FFI are real under `full-suite-abi` (`src/ffi/{reader,expect,node}.rs`). Print helpers used by reader data-print live with reader; write-track stubs stay scaffolding.
 
 ### Safe-core surface shapes (Expect / Node)
 
 - **MPack**: Pointer-rich `mpack_expect_*` / `mpack_node_*` / pools / `*_alloc` / `char*` copies.
 - **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node stays the minimal locked `Tree` / `Node` list. Allocation and C string copies stay in `src/ffi/`.
-- **Status**: Safe-core Expect/Node and Expect FFI are done (`test-expect.c` green under `--full --everything`). Node FFI wrapping remains for `test-node.c`.
+- **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; gate `test-node.c` under `--full --everything`.
 - **Signature changes** to locked safe-core exports require lead approval and a row in the Expect / Node tables above.
 
 ## Explicit non-goals (for now)
