@@ -35,6 +35,7 @@ typedef struct {
     int warmup;
     int iters;
     int json;
+    const char* fixture_path;
 } run_opts;
 
 static uint64_t nsec_now(void) {
@@ -447,13 +448,57 @@ static int run_decode_latency(const run_opts* opts, int use_node) {
     return 0;
 }
 
+static char* read_entire_file(const char* path, size_t* out_size) {
+    FILE* file;
+    long file_size;
+    char* data;
+    size_t nread;
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "failed to open fixture %s\n", path);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    file_size = ftell(file);
+    if (file_size < 0) {
+        fclose(file);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    data = (char*)malloc((size_t)file_size);
+    if (data == NULL) {
+        fclose(file);
+        return NULL;
+    }
+    nread = fread(data, 1, (size_t)file_size, file);
+    fclose(file);
+    if (nread != (size_t)file_size) {
+        free(data);
+        return NULL;
+    }
+    *out_size = (size_t)file_size;
+    return data;
+}
+
+/* Decode-only RSS: load a pre-built fixture and parse it. Encode must not run
+ * in this process so ru_maxrss reflects decode (+ input buffer), not encode. */
 static int run_rss(const run_opts* opts) {
     size_t size = 0;
     char* data;
     long rss;
-    (void)opts;
 
-    data = encode_large(LARGE_TARGET_BYTES, &size);
+    if (opts->fixture_path == NULL) {
+        fprintf(stderr, "rss requires --fixture PATH (decode-only process)\n");
+        return 2;
+    }
+    data = read_entire_file(opts->fixture_path, &size);
     if (data == NULL) {
         return 1;
     }
@@ -465,14 +510,29 @@ static int run_rss(const run_opts* opts) {
     free(data);
     if (opts->json) {
         printf(
-            "{\"metric\":\"rss\",\"peak_bytes\":%ld,\"fixture_bytes\":%zu}\n",
+            "{\"metric\":\"rss\",\"peak_bytes\":%ld,\"fixture_bytes\":%zu,"
+            "\"mode\":\"decode_only\"}\n",
             rss,
             size
         );
     } else {
-        printf("rss peak_bytes=%ld fixture_bytes=%zu\n", rss, size);
+        printf("rss peak_bytes=%ld fixture_bytes=%zu mode=decode_only\n", rss, size);
     }
     return rss < 0 ? 1 : 0;
+}
+
+static int run_dump_large_fixture(void) {
+    size_t size = 0;
+    char* data = encode_large(LARGE_TARGET_BYTES, &size);
+    if (data == NULL) {
+        return 1;
+    }
+    if (fwrite(data, 1, size, stdout) != size) {
+        free(data);
+        return 1;
+    }
+    free(data);
+    return 0;
 }
 
 static int run_startup(const run_opts* opts) {
@@ -507,10 +567,10 @@ static int run_dump_fixture(void) {
 static void usage(const char* argv0) {
     fprintf(
         stderr,
-        "usage: %s <workload> [--json] [--warmup N] [--iters N]\n"
+        "usage: %s <workload> [--json] [--warmup N] [--iters N] [--fixture PATH]\n"
         "workloads: encode | decode-reader | decode-node |\n"
         "           encode-latency | decode-reader-latency | decode-node-latency |\n"
-        "           rss | startup | dump-fixture\n",
+        "           rss | startup | dump-fixture | dump-large-fixture\n",
         argv0
     );
 }
@@ -523,6 +583,7 @@ int main(int argc, char** argv) {
     opts.warmup = WARMUP_DEFAULT;
     opts.iters = 0;
     opts.json = 0;
+    opts.fixture_path = NULL;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -536,6 +597,8 @@ int main(int argc, char** argv) {
             opts.warmup = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             opts.iters = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--fixture") == 0 && i + 1 < argc) {
+            opts.fixture_path = argv[++i];
         } else {
             usage(argv[0]);
             return 2;
@@ -544,6 +607,9 @@ int main(int argc, char** argv) {
 
     if (strcmp(workload, "dump-fixture") == 0) {
         return run_dump_fixture();
+    }
+    if (strcmp(workload, "dump-large-fixture") == 0) {
+        return run_dump_large_fixture();
     }
     if (strcmp(workload, "startup") == 0) {
         return run_startup(&opts);
