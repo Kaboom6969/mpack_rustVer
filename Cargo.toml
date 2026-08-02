@@ -99,5 +99,10 @@ name = "node_ffi_lifecycle"
 path = "tests/port/node_ffi_lifecycle.rs"
 required-features = ["full-suite-abi"]
 
+[[test]]
+name = "writer_ffi_destroy"
+path = "tests/port/writer_ffi_destroy.rs"
+required-features = ["full-suite-abi"]
+
 [build-dependencies]
 cc = { version = "1.4.0", optional = true }

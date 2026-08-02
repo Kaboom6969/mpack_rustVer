@@ -2,12 +2,50 @@
 
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use crate::ffi::types::{
     MpackError, MpackTrack, MpackTrackElement, MPACK_ERROR_BUG, MPACK_ERROR_MEMORY, MPACK_OK,
 };
 
 const TRACKING_INITIAL_CAPACITY: usize = 8;
+
+/// When set, the next `track_init` returns `mpack_error_memory` without allocating.
+/// Consumed (cleared) on use. Port / unit tests only.
+static FORCE_TRACK_INIT_FAIL: AtomicBool = AtomicBool::new(false);
+static TRACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn track_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TRACK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serialize tests that touch `track_init` so a forced-fail flag cannot be stolen.
+#[doc(hidden)]
+pub fn with_track_test_serial<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = track_test_lock();
+    f()
+}
+
+/// Test hook: run `f` with the next `track_init` forced to fail (serialized).
+#[doc(hidden)]
+pub fn with_forced_track_init_fail<R>(f: impl FnOnce() -> R) -> R {
+    with_track_test_serial(|| {
+        FORCE_TRACK_INIT_FAIL.store(true, Ordering::SeqCst);
+        let result = f();
+        FORCE_TRACK_INIT_FAIL.store(false, Ordering::SeqCst);
+        result
+    })
+}
+
+/// Test hook: force the next `track_init` to fail with memory error.
+/// Prefer [`with_forced_track_init_fail`] when tests may run in parallel.
+#[doc(hidden)]
+pub fn force_track_init_fail_for_tests(force: bool) {
+    FORCE_TRACK_INIT_FAIL.store(force, Ordering::SeqCst);
+}
 
 const TYPE_STR: c_int = 7;
 const TYPE_BIN: c_int = 8;
@@ -34,6 +72,11 @@ fn break_hit(message: &[u8]) {
 /// Initializes an empty growable track stack (C `mpack_track_init`).
 pub(crate) fn track_init(track: &mut MpackTrack) -> MpackError {
     track.count = 0;
+    if FORCE_TRACK_INIT_FAIL.swap(false, Ordering::SeqCst) {
+        track.capacity = 0;
+        track.elements = ptr::null_mut();
+        return MPACK_ERROR_MEMORY;
+    }
     track.capacity = TRACKING_INITIAL_CAPACITY;
     let bytes = TRACKING_INITIAL_CAPACITY.saturating_mul(std::mem::size_of::<MpackTrackElement>());
     // SAFETY: libc malloc returns aligned storage or null.
@@ -63,6 +106,20 @@ fn track_grow(track: &mut MpackTrack) -> MpackError {
 
 /// Pushes a typed element/byte count onto the track (C `mpack_track_push`).
 pub(crate) fn track_push(track: &mut MpackTrack, type_: c_int, count: u32) -> MpackError {
+    track_push_impl(track, type_, count, false)
+}
+
+/// Pushes a builder-owned compound entry.
+pub(crate) fn track_push_builder(track: &mut MpackTrack, type_: c_int) -> MpackError {
+    track_push_impl(track, type_, 0, true)
+}
+
+fn track_push_impl(
+    track: &mut MpackTrack,
+    type_: c_int,
+    count: u32,
+    builder: bool,
+) -> MpackError {
     if track.elements.is_null() {
         return MPACK_ERROR_BUG;
     }
@@ -78,7 +135,7 @@ pub(crate) fn track_push(track: &mut MpackTrack, type_: c_int, count: u32) -> Mp
             type_,
             left: count,
             key_needs_value: false,
-            builder: false,
+            builder,
         };
     }
     track.count += 1;
@@ -118,6 +175,11 @@ fn track_pop_impl(track: &mut MpackTrack, type_: c_int, builder: bool) -> MpackE
 /// Pops a non-builder track entry (C `mpack_track_pop`).
 pub(crate) fn track_pop(track: &mut MpackTrack, type_: c_int) -> MpackError {
     track_pop_impl(track, type_, false)
+}
+
+/// Pops a builder-owned compound entry.
+pub(crate) fn track_pop_builder(track: &mut MpackTrack, type_: c_int) -> MpackError {
+    track_pop_impl(track, type_, true)
 }
 
 fn track_peek_element_impl(track: &MpackTrack, read: bool) -> MpackError {

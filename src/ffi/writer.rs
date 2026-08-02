@@ -1,7 +1,9 @@
 //! C ABI boundary for the fixed-buffer `embed-writer` slice.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
+use std::ffi::{c_char, c_int, c_uint, c_void};
+#[cfg(not(feature = "full-suite-abi"))]
+use std::ffi::CStr;
 use std::ptr;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
@@ -22,6 +24,61 @@ unsafe extern "C" {
     fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
     fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
     fn fclose(file: *mut c_void) -> c_int;
+}
+
+#[cfg(feature = "full-suite-abi")]
+unsafe extern "C" {
+    fn test_malloc(size: usize) -> *mut c_void;
+    fn test_free(pointer: *mut c_void);
+    fn test_strlen(value: *const c_char) -> usize;
+}
+
+/// Allocates a growable result buffer with the allocator configured for the
+/// active C ABI. Under the frozen everything suite the caller receives this
+/// buffer and frees it through `MPACK_FREE`, so it must come from `test_malloc`.
+unsafe fn growable_alloc(size: usize) -> *mut c_void {
+    #[cfg(feature = "full-suite-abi")]
+    {
+        unsafe { test_malloc(size) }
+    }
+    #[cfg(not(feature = "full-suite-abi"))]
+    {
+        unsafe { malloc(size) }
+    }
+}
+
+unsafe fn growable_realloc(pointer: *mut c_void, used: usize, size: usize) -> *mut c_void {
+    #[cfg(feature = "full-suite-abi")]
+    {
+        // `MPACK_REALLOC` is not configured for the frozen suite. Mirror
+        // MPack's platform fallback: allocate through MPACK_MALLOC, copy the
+        // initialized prefix, then release through MPACK_FREE.
+        let replacement = unsafe { test_malloc(size) };
+        if replacement.is_null() {
+            return ptr::null_mut();
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(pointer.cast::<u8>(), replacement.cast::<u8>(), used);
+            test_free(pointer);
+        }
+        replacement
+    }
+    #[cfg(not(feature = "full-suite-abi"))]
+    {
+        let _ = used;
+        unsafe { realloc(pointer, size) }
+    }
+}
+
+unsafe fn growable_free(pointer: *mut c_void) {
+    #[cfg(feature = "full-suite-abi")]
+    {
+        unsafe { test_free(pointer) };
+    }
+    #[cfg(not(feature = "full-suite-abi"))]
+    {
+        unsafe { free(pointer) };
+    }
 }
 
 struct GrowableContext {
@@ -75,6 +132,8 @@ pub unsafe extern "C" fn mpack_writer_init(
         // SAFETY: The C API requires `writer` to point to writable storage for
         // one `mpack_writer_t`. The null case was handled above.
         unsafe {
+            let mut initialized = initialized;
+            initialize_writer_tracking(&mut initialized);
             writer.write(initialized);
         }
     })
@@ -120,18 +179,21 @@ pub unsafe extern "C" fn mpack_writer_init_growable(
             target_data.write(ptr::null_mut());
             target_size.write(0);
         }
-        // SAFETY: C malloc returns suitably aligned storage or null.
-        let buffer = unsafe { malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
+        // SAFETY: The active ABI allocator returns aligned storage or null.
+        let buffer = unsafe { growable_alloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
         if buffer.is_null() {
             // SAFETY: `writer` is writable and non-null.
             unsafe { writer.write(MpackWriter::error_state(crate::ffi::types::MPACK_ERROR_MEMORY)) };
             return;
         }
+        let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
+        // Match C: `mpack_writer_init` may sticky-error on track_init but keeps
+        // the buffer; growable always installs flush/teardown so destroy frees.
+        initialize_writer_tracking(&mut state);
         let context = Box::new(GrowableContext {
             target_data,
             target_size,
         });
-        let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
         state.context = Box::into_raw(context).cast::<c_void>();
         state.flush = Some(growable_flush);
         state.teardown = Some(growable_teardown);
@@ -180,6 +242,17 @@ pub unsafe extern "C" fn mpack_writer_destroy(writer: *mut MpackWriter) -> Mpack
         // SAFETY: The C API requires `writer` to point to an initialized
         // `mpack_writer_t`. The null case was handled above.
         let state = unsafe { &mut *writer };
+        // Track cleanup must precede flush/teardown (C `mpack_writer_destroy`
+        // and reader destroy). Incomplete compounds sticky-error first so a
+        // growable teardown does not hand the buffer to C.
+        #[cfg(feature = "full-suite-abi")]
+        {
+            let cancel = state.error != MPACK_OK;
+            let track_error = crate::ffi::stubs::track::track_destroy(&mut state.track, cancel);
+            if state.error == MPACK_OK && track_error != MPACK_OK {
+                flag_error_impl(writer, track_error);
+            }
+        }
         if state.error == MPACK_OK && state.position != state.buffer {
             if let Some(flush) = state.flush.take() {
                 let used = state.position as usize - state.buffer as usize;
@@ -206,6 +279,7 @@ fn write_nil_impl(writer: *mut MpackWriter) {
 
 fn write_with_core(writer: *mut MpackWriter, mut write: impl FnMut(&mut Writer<'_>)) {
     builder_record_value(writer);
+    writer_track_element(writer);
     loop {
         // SAFETY: The caller must provide a live, uniquely writable writer.
         let state = unsafe { &mut *writer };
@@ -263,6 +337,83 @@ fn flag_bug(writer: *mut MpackWriter) {
     }
 }
 
+#[cfg(feature = "full-suite-abi")]
+fn initialize_writer_tracking(writer: &mut MpackWriter) {
+    let track_error = crate::ffi::stubs::track::track_init(&mut writer.track);
+    if track_error != MPACK_OK {
+        writer.error = track_error;
+    }
+}
+
+#[cfg(not(feature = "full-suite-abi"))]
+fn initialize_writer_tracking(_writer: &mut MpackWriter) {}
+
+#[cfg(feature = "full-suite-abi")]
+fn writer_track_element(writer: *mut MpackWriter) {
+    // SAFETY: Writer exports establish a live, uniquely writable writer.
+    let state = unsafe { &mut *writer };
+    if state.error == MPACK_OK {
+        let error = crate::ffi::stubs::track::track_element(&mut state.track);
+        if error != MPACK_OK {
+            flag_error_impl(writer, error);
+        }
+    }
+}
+
+#[cfg(not(feature = "full-suite-abi"))]
+fn writer_track_element(_writer: *mut MpackWriter) {}
+
+#[cfg(feature = "full-suite-abi")]
+unsafe extern "C" {
+    fn mpack_break_hit(message: *const c_char);
+}
+
+#[cfg(feature = "full-suite-abi")]
+fn writer_break(message: &[u8]) {
+    // SAFETY: The frozen suite provides this debug assertion shim.
+    unsafe { mpack_break_hit(message.as_ptr().cast()) };
+}
+
+#[cfg(not(feature = "full-suite-abi"))]
+fn writer_break(_message: &[u8]) {}
+
+#[cfg(feature = "full-suite-abi")]
+fn writer_uses_v4(writer: *const MpackWriter) -> bool {
+    // SAFETY: The caller supplies a live writer.
+    unsafe { (*writer).version <= 4 }
+}
+
+#[cfg(not(feature = "full-suite-abi"))]
+fn writer_uses_v4(_writer: *const MpackWriter) -> bool {
+    false
+}
+
+fn write_string_header(writer: *mut MpackWriter, length: usize, binary: bool) {
+    write_with_core(writer, |core| {
+        if writer_uses_v4(writer) {
+            core.write_str_header_v4(length);
+        } else if binary {
+            core.write_bin_header(length);
+        } else {
+            core.write_str_header(length);
+        }
+    });
+}
+
+fn cstr_length(cstr: *const c_char) -> usize {
+    #[cfg(feature = "full-suite-abi")]
+    {
+        // SAFETY: The C API requires a valid C string; the suite can replace
+        // this call with an oversized value to exercise the size guard.
+        unsafe { test_strlen(cstr) }
+    }
+    #[cfg(not(feature = "full-suite-abi"))]
+    {
+        // SAFETY: The C API requires a valid NUL-terminated byte string.
+        unsafe { CStr::from_ptr(cstr).to_bytes().len() }
+    }
+}
+
 macro_rules! writer_operation {
     ($name:ident($argument:ident: $argument_type:ty) => $method:ident) => {
         #[no_mangle]
@@ -291,23 +442,35 @@ writer_operation!(mpack_write_double(value: f64) => write_f64);
 writer_operation!(mpack_write_raw_float(value: u32) => write_f32_bits);
 writer_operation!(mpack_write_raw_double(value: u64) => write_f64_bits);
 
-macro_rules! writer_count_operation {
-    ($name:ident => $method:ident) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(writer: *mut MpackWriter, count: c_uint) {
-            if writer.is_null() {
-                return;
-            }
-            if catch_ffi_panic(|| write_with_core(writer, |core| core.$method(count as usize))).is_err()
-            {
-                flag_bug(writer);
-            }
-        }
-    };
+#[no_mangle]
+pub unsafe extern "C" fn mpack_start_str(writer: *mut MpackWriter, count: c_uint) {
+    if writer.is_null() {
+        return;
+    }
+    if catch_ffi_panic(|| {
+        write_string_header(writer, count as usize, false);
+        unsafe { mpack_writer_track_push(writer, 7, count) };
+    })
+    .is_err()
+    {
+        flag_bug(writer);
+    }
 }
 
-writer_count_operation!(mpack_start_str => write_str_header);
-writer_count_operation!(mpack_start_bin => write_bin_header);
+#[no_mangle]
+pub unsafe extern "C" fn mpack_start_bin(writer: *mut MpackWriter, count: c_uint) {
+    if writer.is_null() {
+        return;
+    }
+    if catch_ffi_panic(|| {
+        write_string_header(writer, count as usize, true);
+        unsafe { mpack_writer_track_push(writer, 8, count) };
+    })
+    .is_err()
+    {
+        flag_bug(writer);
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn mpack_start_array(writer: *mut MpackWriter, count: c_uint) {
@@ -316,6 +479,7 @@ pub unsafe extern "C" fn mpack_start_array(writer: *mut MpackWriter, count: c_ui
     }
     if catch_ffi_panic(|| {
         write_with_core(writer, |core| core.write_array_header(count as usize));
+        unsafe { mpack_writer_track_push(writer, 9, count) };
         builder_start_known(writer, count as usize);
     })
     .is_err()
@@ -331,6 +495,7 @@ pub unsafe extern "C" fn mpack_start_map(writer: *mut MpackWriter, count: c_uint
     }
     if catch_ffi_panic(|| {
         write_with_core(writer, |core| core.write_map_header(count as usize));
+        unsafe { mpack_writer_track_push(writer, 10, count) };
         builder_start_known(writer, (count as usize).saturating_mul(2));
     })
     .is_err()
@@ -349,10 +514,16 @@ pub unsafe extern "C" fn mpack_start_ext(
     if writer.is_null() {
         return;
     }
+    if writer_uses_v4(writer) {
+        writer_break(b"Ext types require spec version v5 or later.\0");
+        flag_bug(writer);
+        return;
+    }
     if catch_ffi_panic(|| {
         write_with_core(writer, |core| {
             core.write_ext_header(ext_type, count as usize)
         });
+        unsafe { mpack_writer_track_push(writer, 11, count) };
     })
     .is_err()
     {
@@ -368,12 +539,12 @@ pub unsafe extern "C" fn mpack_write_ext(
     data: *const c_char,
     count: c_uint,
 ) {
-    write_c_bytes(writer, data, count as usize, |writer, bytes| {
-        write_with_core(writer, |core| {
-            core.write_ext_header(ext_type, bytes.len())
-        });
-        write_raw_buffered(writer, bytes);
-    });
+    if writer.is_null() {
+        return;
+    }
+    unsafe { mpack_start_ext(writer, ext_type, count) };
+    unsafe { mpack_write_bytes(writer, data, count as usize) };
+    unsafe { mpack_writer_track_pop(writer, 11) };
 }
 
 /// Writes a timestamp using MessagePack's 32/64/96-bit canonical forms.
@@ -384,6 +555,16 @@ pub unsafe extern "C" fn mpack_write_timestamp(
     nanoseconds: u32,
 ) {
     if writer.is_null() {
+        return;
+    }
+    if writer_uses_v4(writer) {
+        writer_break(b"Timestamps require spec version v5 or later.\0");
+        flag_bug(writer);
+        return;
+    }
+    if nanoseconds > 999_999_999 {
+        writer_break(b"timestamp nanoseconds out of bounds\0");
+        flag_bug(writer);
         return;
     }
     if catch_ffi_panic(|| {
@@ -441,40 +622,98 @@ pub unsafe extern "C" fn mpack_complete_map(writer: *mut MpackWriter) {
     }
 }
 
-/// Tracking ABI hook. The configuration-neutral cdylib cannot infer whether
-/// the C translation unit enabled tracking, so these hooks intentionally keep
-/// layout/link compatibility while safe-core tracking remains opt-in.
 #[no_mangle]
 pub unsafe extern "C" fn mpack_writer_track_push(
-    _writer: *mut MpackWriter,
-    _type: c_int,
-    _count: u32,
+    writer: *mut MpackWriter,
+    type_: c_int,
+    count: u32,
 ) {
+    #[cfg(not(feature = "full-suite-abi"))]
+    let _ = (writer, type_, count);
+    #[cfg(feature = "full-suite-abi")]
+    if !writer.is_null() {
+        let state = unsafe { &mut *writer };
+        if state.error == MPACK_OK {
+            let error = crate::ffi::stubs::track::track_push(&mut state.track, type_, count);
+            if error != MPACK_OK {
+                flag_error_impl(writer, error);
+            }
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn mpack_writer_track_push_builder(
-    _writer: *mut MpackWriter,
-    _type: c_int,
+    writer: *mut MpackWriter,
+    type_: c_int,
 ) {
+    #[cfg(not(feature = "full-suite-abi"))]
+    let _ = (writer, type_);
+    #[cfg(feature = "full-suite-abi")]
+    if !writer.is_null() {
+        let state = unsafe { &mut *writer };
+        if state.error == MPACK_OK {
+            let error = crate::ffi::stubs::track::track_push_builder(&mut state.track, type_);
+            if error != MPACK_OK {
+                flag_error_impl(writer, error);
+            }
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn mpack_writer_track_pop(
-    _writer: *mut MpackWriter,
-    _type: c_int,
+    writer: *mut MpackWriter,
+    type_: c_int,
 ) {
+    #[cfg(not(feature = "full-suite-abi"))]
+    let _ = (writer, type_);
+    #[cfg(feature = "full-suite-abi")]
+    if !writer.is_null() {
+        let state = unsafe { &mut *writer };
+        if state.error == MPACK_OK {
+            let error = crate::ffi::stubs::track::track_pop(&mut state.track, type_);
+            if error != MPACK_OK {
+                flag_error_impl(writer, error);
+            }
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn mpack_writer_track_pop_builder(
-    _writer: *mut MpackWriter,
-    _type: c_int,
+    writer: *mut MpackWriter,
+    type_: c_int,
 ) {
+    #[cfg(not(feature = "full-suite-abi"))]
+    let _ = (writer, type_);
+    #[cfg(feature = "full-suite-abi")]
+    if !writer.is_null() {
+        let state = unsafe { &mut *writer };
+        if state.error == MPACK_OK {
+            let error = crate::ffi::stubs::track::track_pop_builder(&mut state.track, type_);
+            if error != MPACK_OK {
+                flag_error_impl(writer, error);
+            }
+        }
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mpack_writer_track_bytes(_writer: *mut MpackWriter, _count: usize) {}
+pub unsafe extern "C" fn mpack_writer_track_bytes(writer: *mut MpackWriter, count: usize) {
+    #[cfg(not(feature = "full-suite-abi"))]
+    let _ = (writer, count);
+    #[cfg(feature = "full-suite-abi")]
+    if !writer.is_null() {
+        let state = unsafe { &mut *writer };
+        if state.error == MPACK_OK {
+            let error = crate::ffi::stubs::track::track_bytes(&mut state.track, count);
+            if error != MPACK_OK {
+                flag_error_impl(writer, error);
+            }
+        }
+    }
+}
 
 /// Writes the MessagePack `true` marker.
 #[no_mangle]
@@ -619,7 +858,10 @@ pub unsafe extern "C" fn mpack_write_bytes(
     data: *const c_char,
     count: usize,
 ) {
-    write_c_bytes(writer, data, count, write_raw_buffered);
+    write_c_bytes(writer, data, count, |writer, bytes| {
+        unsafe { mpack_writer_track_bytes(writer, bytes.len()) };
+        write_raw_buffered(writer, bytes);
+    });
 }
 
 /// Writes a MessagePack string header followed by its raw bytes.
@@ -630,7 +872,7 @@ pub unsafe extern "C" fn mpack_write_str(
     count: c_uint,
 ) {
     write_c_bytes(writer, data, count as usize, |writer, bytes| {
-        write_with_core(writer, |core| core.write_str_header(bytes.len()));
+        write_string_header(writer, bytes.len(), false);
         write_raw_buffered(writer, bytes);
     });
 }
@@ -642,10 +884,12 @@ pub unsafe extern "C" fn mpack_write_bin(
     data: *const c_char,
     count: c_uint,
 ) {
-    write_c_bytes(writer, data, count as usize, |writer, bytes| {
-        write_with_core(writer, |core| core.write_bin_header(bytes.len()));
-        write_raw_buffered(writer, bytes);
-    });
+    if writer.is_null() {
+        return;
+    }
+    unsafe { mpack_start_bin(writer, count) };
+    unsafe { mpack_write_bytes(writer, data, count as usize) };
+    unsafe { mpack_writer_track_pop(writer, 8) };
 }
 
 /// Writes raw object bytes. With write tracking disabled this is equivalent to
@@ -656,7 +900,12 @@ pub unsafe extern "C" fn mpack_write_object_bytes(
     data: *const c_char,
     count: usize,
 ) {
-    write_c_bytes(writer, data, count, write_raw_buffered);
+    write_c_bytes(writer, data, count, |writer, bytes| {
+        // C `mpack_write_object_bytes`: track_element (incl. builder) then native.
+        builder_record_value(writer);
+        writer_track_element(writer);
+        write_raw_buffered(writer, bytes);
+    });
 }
 
 /// Writes an MPack object header represented by `mpack_tag_t`.
@@ -673,14 +922,34 @@ pub unsafe extern "C" fn mpack_write_tag(writer: *mut MpackWriter, tag: MpackTag
             4 => core.write_u64(tag.value),
             5 => core.write_f32_bits(tag.value as u32),
             6 => core.write_f64_bits(tag.value),
-            7 => core.write_str_header(tag.value as usize),
-            8 => core.write_bin_header(tag.value as usize),
+            7 => {
+                if writer_uses_v4(writer) {
+                    core.write_str_header_v4(tag.value as usize)
+                } else {
+                    core.write_str_header(tag.value as usize)
+                }
+            }
+            8 => {
+                if writer_uses_v4(writer) {
+                    core.write_str_header_v4(tag.value as usize)
+                } else {
+                    core.write_bin_header(tag.value as usize)
+                }
+            }
             9 => core.write_array_header(tag.value as usize),
             10 => core.write_map_header(tag.value as usize),
             #[cfg(feature = "full-suite-abi")]
             11 => core.write_ext_header(tag.exttype, tag.value as usize),
             _ => flag_bug(writer),
         });
+        match tag.type_ {
+            7 | 8 | 9 | 10 => unsafe {
+                mpack_writer_track_push(writer, tag.type_, tag.value as u32)
+            },
+            #[cfg(feature = "full-suite-abi")]
+            11 => unsafe { mpack_writer_track_push(writer, tag.type_, tag.value as u32) },
+            _ => {}
+        }
     })
     .is_err()
     {
@@ -699,10 +968,15 @@ pub unsafe extern "C" fn mpack_write_cstr(writer: *mut MpackWriter, cstr: *const
         return;
     }
     if catch_ffi_panic(|| {
-        // SAFETY: The C API requires `cstr` to point to a valid NUL-terminated
-        // byte string for the duration of this call.
-        let bytes = unsafe { CStr::from_ptr(cstr).to_bytes() };
-        write_with_core(writer, |core| core.write_str_header(bytes.len()));
+        let length = cstr_length(cstr);
+        if length > u32::MAX as usize {
+            flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_INVALID);
+            return;
+        }
+        // SAFETY: The C API requires `cstr` to reference `length` readable
+        // bytes followed by a NUL terminator.
+        let bytes = unsafe { slice::from_raw_parts(cstr.cast::<u8>(), length) };
+        write_string_header(writer, bytes.len(), false);
         write_raw_buffered(writer, bytes);
     })
     .is_err()
@@ -767,10 +1041,13 @@ pub unsafe extern "C" fn mpack_write_utf8_cstr(writer: *mut MpackWriter, cstr: *
         flag_bug(writer);
         return;
     }
-    // SAFETY: The non-null C string contract is forwarded to the length form.
-    let bytes = unsafe { CStr::from_ptr(cstr).to_bytes() };
+    let length = cstr_length(cstr);
+    if length > u32::MAX as usize {
+        flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_INVALID);
+        return;
+    }
     // SAFETY: `bytes` remains borrowed from `cstr` for this immediate call.
-    unsafe { mpack_write_utf8(writer, cstr, bytes.len() as c_uint) };
+    unsafe { mpack_write_utf8(writer, cstr, length as c_uint) };
 }
 
 /// Writes a null-terminated UTF-8 string, or nil for a null pointer.
@@ -801,7 +1078,16 @@ pub unsafe extern "C" fn mpack_writer_flush_message(writer: *mut MpackWriter) {
         if state.error != MPACK_OK {
             return;
         }
+        #[cfg(feature = "full-suite-abi")]
+        {
+            let track_error = crate::ffi::stubs::track::track_check_empty(&state.track);
+            if track_error != MPACK_OK {
+                flag_error_impl(writer, track_error);
+                return;
+            }
+        }
         let Some(flush) = state.flush else {
+            writer_break(b"cannot flush a writer with no flush callback\0");
             flag_error_impl(writer, MPACK_ERROR_BUG);
             return;
         };
@@ -990,6 +1276,16 @@ fn builder_start_known(writer: *mut MpackWriter, elements: usize) {
 fn builder_start(writer: *mut MpackWriter, kind: BuildKind) {
     // A nested builder is one value in its parent builder.
     builder_record_value(writer);
+    writer_track_element(writer);
+    unsafe {
+        mpack_writer_track_push_builder(
+            writer,
+            match kind {
+                BuildKind::Array => 9,
+                BuildKind::Map => 10,
+            },
+        );
+    }
     // SAFETY: Exported callers provide a live writer.
     let state = unsafe { &mut *writer };
     if state.error != MPACK_OK {
@@ -1039,6 +1335,19 @@ fn builder_start(writer: *mut MpackWriter, kind: BuildKind) {
 }
 
 fn builder_complete(writer: *mut MpackWriter, kind: BuildKind) {
+    unsafe {
+        mpack_writer_track_pop_builder(
+            writer,
+            match kind {
+                BuildKind::Array => 9,
+                BuildKind::Map => 10,
+            },
+        );
+    }
+    // SAFETY: Exported callers establish a live, writable writer.
+    if unsafe { (*writer).error } != MPACK_OK {
+        return;
+    }
     let frame = {
         let Ok(mut builders) = ffi_builders().lock() else {
             flag_error_impl(writer, MPACK_ERROR_BUG);
@@ -1133,11 +1442,14 @@ fn init_file_writer(writer: *mut MpackWriter, file: *mut c_void, close_when_done
         }
         return;
     }
+    let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
+    // Match C `mpack_writer_init_stdfile`: track_init may sticky-error but the
+    // buffer is kept and flush/teardown (plus FILE context) are always wired.
+    initialize_writer_tracking(&mut state);
     let context = Box::new(FileContext {
         file,
         close_when_done,
     });
-    let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
     state.context = Box::into_raw(context).cast::<c_void>();
     state.flush = Some(file_flush);
     state.teardown = Some(file_teardown);
@@ -1177,8 +1489,11 @@ unsafe extern "C" fn growable_flush(
         };
         capacity = next;
     }
-    // SAFETY: The existing buffer came from C malloc/realloc.
-    let new_buffer = unsafe { realloc(state.buffer.cast::<c_void>(), capacity).cast::<c_char>() };
+    // SAFETY: The existing buffer came from the matching ABI allocator.
+    let new_buffer =
+        unsafe {
+            growable_realloc(state.buffer.cast::<c_void>(), buffered, capacity).cast::<c_char>()
+        };
     if new_buffer.is_null() {
         flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_MEMORY);
         return;
@@ -1206,11 +1521,12 @@ unsafe extern "C" fn growable_teardown(writer: *mut MpackWriter) {
     if state.error == MPACK_OK {
         // Preserve C MPack's non-null result for an empty successful message.
         let wanted = used.max(1);
-        // SAFETY: The buffer came from C malloc/realloc.
-        let resized = unsafe { realloc(state.buffer.cast::<c_void>(), wanted).cast::<c_char>() };
+        // SAFETY: The buffer came from the matching ABI allocator.
+        let resized =
+            unsafe { growable_realloc(state.buffer.cast::<c_void>(), used, wanted).cast::<c_char>() };
         if resized.is_null() {
             // SAFETY: Free the original allocation after resize failure.
-            unsafe { free(state.buffer.cast::<c_void>()) };
+            unsafe { growable_free(state.buffer.cast::<c_void>()) };
             state.buffer = ptr::null_mut();
             flag_error_impl(writer, crate::ffi::types::MPACK_ERROR_MEMORY);
         } else {
@@ -1222,8 +1538,8 @@ unsafe extern "C" fn growable_teardown(writer: *mut MpackWriter) {
             state.buffer = ptr::null_mut();
         }
     } else if !state.buffer.is_null() {
-        // SAFETY: The buffer came from C malloc/realloc.
-        unsafe { free(state.buffer.cast::<c_void>()) };
+        // SAFETY: The buffer came from the matching ABI allocator.
+        unsafe { growable_free(state.buffer.cast::<c_void>()) };
         state.buffer = ptr::null_mut();
     }
     state.context = ptr::null_mut();
@@ -1264,4 +1580,164 @@ unsafe extern "C" fn file_teardown(writer: *mut MpackWriter) {
     }
     state.buffer = ptr::null_mut();
     state.context = ptr::null_mut();
+}
+
+/// Suite symbols required when linking the `full-suite-abi` cdylib under `cargo test`.
+/// Frozen-link builds without `cfg(test)` and supplies these from the C suite.
+#[cfg(all(test, feature = "full-suite-abi"))]
+mod suite_test_shims {
+    use std::alloc::{alloc_zeroed, Layout};
+    use std::ffi::c_void;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_malloc(size: usize) -> *mut c_void {
+        let layout = Layout::from_size_align(size.max(1), 8).unwrap();
+        unsafe { alloc_zeroed(layout) }.cast()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_free(pointer: *mut c_void) {
+        let _ = pointer;
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_strlen(value: *const i8) -> usize {
+        if value.is_null() {
+            return 0;
+        }
+        unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes().len()
+    }
+}
+
+#[cfg(all(test, feature = "full-suite-abi"))]
+mod growable_track_init_tests {
+    use super::*;
+    use crate::ffi::{with_forced_track_init_fail, with_track_test_serial};
+    use crate::ffi::types::{MPACK_ERROR_BUG, MPACK_ERROR_MEMORY};
+    use std::mem::MaybeUninit;
+
+    #[test]
+    fn growable_track_init_failure_keeps_buffer_and_destroy_is_safe() {
+        with_forced_track_init_fail(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(
+                    !(*writer).buffer.is_null(),
+                    "track fail must not free buffer early"
+                );
+                assert!(
+                    (*writer).teardown.is_some(),
+                    "teardown must stay wired for reclaim"
+                );
+                assert!(data.is_null());
+                assert_eq!(size, 0);
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!(data.is_null());
+                assert_eq!(size, 0);
+                assert!((*writer).buffer.is_null());
+            }
+        });
+    }
+
+    fn open_temp_file() -> *mut c_void {
+        // SAFETY: NUL-terminated literals; creates/truncates a private temp path.
+        let path = c"mpack_writer_track_init_fail.tmp";
+        let mode = c"wb+";
+        unsafe { fopen(path.as_ptr(), mode.as_ptr()) }
+    }
+
+    #[test]
+    fn file_track_init_failure_close_true_keeps_buffer_and_destroy_is_safe() {
+        with_forced_track_init_fail(|| {
+            let file = open_temp_file();
+            assert!(!file.is_null());
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            unsafe {
+                mpack_writer_init_stdfile(writer.as_mut_ptr(), file, true);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(!(*writer).buffer.is_null());
+                assert!((*writer).teardown.is_some());
+                assert!(!((*writer).context.is_null()));
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!((*writer).buffer.is_null());
+                assert!((*writer).context.is_null());
+            }
+        });
+    }
+
+    #[test]
+    fn file_track_init_failure_close_false_does_not_close_file() {
+        with_forced_track_init_fail(|| {
+            let file = open_temp_file();
+            assert!(!file.is_null());
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            unsafe {
+                mpack_writer_init_stdfile(writer.as_mut_ptr(), file, false);
+                let writer = writer.as_mut_ptr();
+                assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+                assert!(!(*writer).buffer.is_null());
+                assert!((*writer).teardown.is_some());
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+                assert!((*writer).buffer.is_null());
+                // Caller still owns FILE*; fwrite proves it was not closed by teardown.
+                let byte: u8 = b'x';
+                let written = fwrite((&byte as *const u8).cast(), 1, 1, file);
+                assert_eq!(written, 1);
+                assert_eq!(fclose(file), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn object_bytes_counts_as_tracked_element() {
+        with_track_test_serial(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            let nil = [0xc0_u8];
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                mpack_start_array(writer, 1);
+                mpack_write_object_bytes(writer, nil.as_ptr().cast(), nil.len());
+                mpack_writer_track_pop(writer, 9); // mpack_type_array
+                assert_eq!(mpack_writer_destroy(writer), MPACK_OK);
+                assert!(!data.is_null());
+                assert_eq!(size, 2); // fixarray(1) + nil
+                growable_free(data.cast());
+            }
+        });
+    }
+
+    #[test]
+    fn object_bytes_without_expected_element_flags_bug() {
+        with_track_test_serial(|| {
+            let mut writer = MaybeUninit::<MpackWriter>::uninit();
+            let mut data: *mut c_char = ptr::null_mut();
+            let mut size = 0_usize;
+            let nil = [0xc0_u8];
+            unsafe {
+                mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+                let writer = writer.as_mut_ptr();
+                mpack_start_array(writer, 0);
+                mpack_write_object_bytes(writer, nil.as_ptr().cast(), nil.len());
+                assert_eq!((*writer).error, MPACK_ERROR_BUG);
+                mpack_writer_track_pop(writer, 9);
+                assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_BUG);
+                assert!(data.is_null());
+            }
+        });
+    }
 }
