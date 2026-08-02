@@ -187,14 +187,9 @@ pub unsafe extern "C" fn mpack_writer_init_growable(
             return;
         }
         let mut state = MpackWriter::fixed_buffer(buffer, OWNED_BUFFER_CAPACITY);
+        // Match C: `mpack_writer_init` may sticky-error on track_init but keeps
+        // the buffer; growable always installs flush/teardown so destroy frees.
         initialize_writer_tracking(&mut state);
-        if state.error != MPACK_OK {
-            // SAFETY: The buffer came from the matching ABI allocator.
-            unsafe { growable_free(buffer.cast()) };
-            // SAFETY: `writer` is writable and non-null.
-            unsafe { writer.write(state) };
-            return;
-        }
         let context = Box::new(GrowableContext {
             target_data,
             target_size,
@@ -1589,4 +1584,72 @@ unsafe extern "C" fn file_teardown(writer: *mut MpackWriter) {
     }
     state.buffer = ptr::null_mut();
     state.context = ptr::null_mut();
+}
+
+/// Suite symbols required when linking the `full-suite-abi` cdylib under `cargo test`.
+/// Frozen-link builds without `cfg(test)` and supplies these from the C suite.
+#[cfg(all(test, feature = "full-suite-abi"))]
+mod suite_test_shims {
+    use std::alloc::{alloc_zeroed, Layout};
+    use std::ffi::c_void;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_malloc(size: usize) -> *mut c_void {
+        let layout = Layout::from_size_align(size.max(1), 8).unwrap();
+        unsafe { alloc_zeroed(layout) }.cast()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_free(pointer: *mut c_void) {
+        let _ = pointer;
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn test_strlen(value: *const i8) -> usize {
+        if value.is_null() {
+            return 0;
+        }
+        unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes().len()
+    }
+}
+
+#[cfg(all(test, feature = "full-suite-abi"))]
+mod growable_track_init_tests {
+    use super::*;
+    use crate::ffi::force_track_init_fail_for_tests;
+    use crate::ffi::types::MPACK_ERROR_MEMORY;
+    use std::mem::MaybeUninit;
+
+    #[test]
+    fn growable_track_init_failure_keeps_buffer_and_destroy_is_safe() {
+        force_track_init_fail_for_tests(true);
+        let mut writer = MaybeUninit::<MpackWriter>::uninit();
+        let mut data: *mut c_char = ptr::null_mut();
+        let mut size = 0_usize;
+        unsafe {
+            mpack_writer_init_growable(writer.as_mut_ptr(), &mut data, &mut size);
+            let writer = writer.as_mut_ptr();
+            assert_eq!((*writer).error, MPACK_ERROR_MEMORY);
+            assert!(
+                !(*writer).buffer.is_null(),
+                "track fail must not free buffer early"
+            );
+            assert!(
+                (*writer).teardown.is_some(),
+                "teardown must stay wired for reclaim"
+            );
+            assert!(data.is_null());
+            assert_eq!(size, 0);
+            assert_eq!(mpack_writer_destroy(writer), MPACK_ERROR_MEMORY);
+            assert!(data.is_null());
+            assert_eq!(size, 0);
+            assert!((*writer).buffer.is_null());
+        }
+    }
 }

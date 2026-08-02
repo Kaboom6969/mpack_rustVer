@@ -2,12 +2,23 @@
 
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ffi::types::{
     MpackError, MpackTrack, MpackTrackElement, MPACK_ERROR_BUG, MPACK_ERROR_MEMORY, MPACK_OK,
 };
 
 const TRACKING_INITIAL_CAPACITY: usize = 8;
+
+/// When set, the next `track_init` returns `mpack_error_memory` without allocating.
+/// Consumed (cleared) on use. Port / unit tests only.
+static FORCE_TRACK_INIT_FAIL: AtomicBool = AtomicBool::new(false);
+
+/// Test hook: force the next `track_init` to fail with memory error.
+#[doc(hidden)]
+pub fn force_track_init_fail_for_tests(force: bool) {
+    FORCE_TRACK_INIT_FAIL.store(force, Ordering::SeqCst);
+}
 
 const TYPE_STR: c_int = 7;
 const TYPE_BIN: c_int = 8;
@@ -34,6 +45,11 @@ fn break_hit(message: &[u8]) {
 /// Initializes an empty growable track stack (C `mpack_track_init`).
 pub(crate) fn track_init(track: &mut MpackTrack) -> MpackError {
     track.count = 0;
+    if FORCE_TRACK_INIT_FAIL.swap(false, Ordering::SeqCst) {
+        track.capacity = 0;
+        track.elements = ptr::null_mut();
+        return MPACK_ERROR_MEMORY;
+    }
     track.capacity = TRACKING_INITIAL_CAPACITY;
     let bytes = TRACKING_INITIAL_CAPACITY.saturating_mul(std::mem::size_of::<MpackTrackElement>());
     // SAFETY: libc malloc returns aligned storage or null.
