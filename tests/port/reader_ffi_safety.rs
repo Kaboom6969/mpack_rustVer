@@ -6,6 +6,13 @@ use mpack::ffi::types::{
     MpackReader, MPACK_ERROR_BUG, MPACK_ERROR_TOO_BIG, MPACK_OK,
 };
 
+/// Suite provides these under frozen-link; cargo tests need local shims.
+#[no_mangle]
+pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
+
 unsafe extern "C" {
     fn mpack_reader_init_data(reader: *mut MpackReader, data: *const i8, count: usize);
     fn mpack_reader_destroy(reader: *mut MpackReader) -> i32;

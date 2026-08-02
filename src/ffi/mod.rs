@@ -6,10 +6,13 @@ pub mod types;
 pub mod writer;
 
 #[cfg(feature = "full-suite-abi")]
-mod reader;
+pub(crate) mod reader;
 
 #[cfg(feature = "full-suite-abi")]
-mod stubs;
+mod expect;
+
+#[cfg(feature = "full-suite-abi")]
+pub(crate) mod stubs;
 
 #[cfg(feature = "ffi-harness")]
 #[doc(hidden)]
