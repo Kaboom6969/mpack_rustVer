@@ -6,6 +6,9 @@
  * test_free is a no-op (leaks). We build without that cfg (so growable buffer
  * size stays 4096) and override the shim symbols at final link with these
  * libc wrappers via -Wl,--allow-multiple-definition (first definition wins).
+ *
+ * bench/run.py hard-gates this with objdump -d: test_free must reference
+ * free@plt (or free); otherwise results are not marked "measured".
  */
 #include <stdio.h>
 #include <stdlib.h>
