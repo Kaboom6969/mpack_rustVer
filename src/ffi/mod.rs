@@ -12,6 +12,9 @@ pub(crate) mod reader;
 mod expect;
 
 #[cfg(feature = "full-suite-abi")]
+pub(crate) mod node;
+
+#[cfg(feature = "full-suite-abi")]
 pub(crate) mod stubs;
 
 #[cfg(feature = "ffi-harness")]

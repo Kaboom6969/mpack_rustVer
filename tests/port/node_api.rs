@@ -66,3 +66,16 @@ fn type_mismatch_is_sticky_on_tree() {
     assert_eq!(tree.error(), Error::Type);
     assert!(tree.root().is_none());
 }
+
+#[test]
+fn parse_reports_size_excluding_trailing() {
+    let tree = Tree::parse(&[0xc0, 0xff]);
+    assert_eq!(tree.error(), Error::Ok);
+    assert_eq!(tree.size(), 1);
+}
+
+#[test]
+fn parse_with_limits_too_big() {
+    let tree = Tree::parse_with_limits(&[0x91, 0xc0], Some(1));
+    assert_eq!(tree.error(), Error::TooBig);
+}

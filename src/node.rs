@@ -18,50 +18,67 @@ use crate::reader::Reader;
 /// shared `&Tree` (mirrors C `mpack_node_*` writing the tree error).
 #[derive(Debug)]
 pub struct Tree<'data> {
-    #[allow(dead_code)]
     data: &'data [u8],
-    #[allow(dead_code)]
     nodes: Vec<NodeData>,
     root: Option<usize>,
     error: Cell<Error>,
+    size: usize,
 }
 
 /// Internal node storage behind the frozen public API; fields may be extended
 /// without changing public signatures.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct NodeData {
-    tag: Tag,
-    payload_off: usize,
-    children: Vec<usize>,
+pub(crate) struct NodeData {
+    pub(crate) tag: Tag,
+    pub(crate) payload_off: usize,
+    pub(crate) children: Vec<usize>,
 }
 
 /// Immutable handle into a [`Tree`] (mirrors `mpack_node_t`).
 #[derive(Debug, Clone, Copy)]
 pub struct Node<'tree, 'data> {
     tree: &'tree Tree<'data>,
-    #[allow(dead_code)]
     index: usize,
+}
+
+struct ParseFrame {
+    node_index: usize,
+    remaining: u32,
 }
 
 impl<'data> Tree<'data> {
     /// Parses one MessagePack value from `data` into a node tree.
     ///
-    /// Nesting uses recursive descent (see `DECISIONS.md`); trailing bytes after
-    /// the first value are allowed.
+    /// Nesting is iterative (see `DECISIONS.md`); trailing bytes after the first
+    /// value are allowed.
     pub fn parse(data: &'data [u8]) -> Self {
+        Self::parse_with_limits(data, None)
+    }
+
+    /// Like [`parse`](Self::parse), but fails with [`Error::TooBig`] once more
+    /// than `max_nodes` nodes would be allocated (C pool / `max_nodes` limit).
+    pub fn parse_with_limits(data: &'data [u8], max_nodes: Option<usize>) -> Self {
         let mut reader = Reader::new(data);
         let mut nodes = Vec::new();
-        let root = parse_node(&mut reader, &mut nodes);
-
-        let tree = Self {
+        let root = parse_tree(&mut reader, &mut nodes, max_nodes);
+        let error = reader.error();
+        let size = if error == Error::Ok {
+            reader.used()
+        } else {
+            0
+        };
+        Self {
             data,
             nodes,
-            root,
-            error: Cell::new(reader.error()),
-        };
+            root: if error == Error::Ok { root } else { None },
+            error: Cell::new(error),
+            size,
+        }
+    }
 
-        tree
+    /// Bytes consumed by the successful parse (0 when the tree has an error).
+    pub fn size(&self) -> usize {
+        self.size
     }
 
     /// Returns the tree's sticky error.
@@ -81,54 +98,169 @@ impl<'data> Tree<'data> {
         if self.error.get() != Error::Ok {
             return None;
         }
-        self.root.map(|index| Node { tree: self, index })
+        self.root.map(|index| Node {
+            tree: self,
+            index,
+        })
+    }
+
+    pub(crate) fn from_parts(
+        data: &'data [u8],
+        nodes: Vec<NodeData>,
+        root: Option<usize>,
+        error: Error,
+        size: usize,
+    ) -> Self {
+        Self {
+            data,
+            nodes,
+            root,
+            error: Cell::new(error),
+            size,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<NodeData>, Option<usize>, Error, usize) {
+        (self.nodes, self.root, self.error.get(), self.size)
+    }
+
+    pub(crate) fn node_at(&self, index: usize) -> Node<'_, 'data> {
+        Node {
+            tree: self,
+            index,
+        }
+    }
+
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub(crate) fn nodes(&self) -> &[NodeData] {
+        &self.nodes
     }
 }
 
-fn parse_node<'data>(reader: &mut Reader<'data>, nodes: &mut Vec<NodeData>) -> Option<usize> {
+fn can_add_node(nodes: &[NodeData], max_nodes: Option<usize>) -> bool {
+    match max_nodes {
+        Some(max) => nodes.len() < max,
+        None => true,
+    }
+}
+
+fn reserve_children(reader: &mut Reader<'_>, child_nodes: u32) -> bool {
+    if child_nodes == 0 {
+        return true;
+    }
+    if child_nodes as usize > reader.remaining() {
+        reader.flag_error(Error::Invalid);
+        return false;
+    }
+    true
+}
+
+fn parse_tree(
+    reader: &mut Reader<'_>,
+    nodes: &mut Vec<NodeData>,
+    max_nodes: Option<usize>,
+) -> Option<usize> {
+    if reader.remaining() == 0 {
+        reader.flag_error(Error::Invalid);
+        return None;
+    }
+
+    let root = parse_push_node(reader, nodes, max_nodes)?;
+    let mut stack: Vec<ParseFrame> = Vec::new();
+    if let Some(remaining) = compound_remaining(nodes[root].tag) {
+        if !reserve_children(reader, remaining) {
+            return None;
+        }
+        if remaining > 0 {
+            stack.push(ParseFrame {
+                node_index: root,
+                remaining,
+            });
+        }
+    }
+
+    while let Some(frame) = stack.last_mut() {
+        if frame.remaining == 0 {
+            stack.pop();
+            continue;
+        }
+        frame.remaining -= 1;
+        let parent = frame.node_index;
+        let child = parse_push_node(reader, nodes, max_nodes)?;
+        nodes[parent].children.push(child);
+        if reader.error() != Error::Ok {
+            return None;
+        }
+        if let Some(remaining) = compound_remaining(nodes[child].tag) {
+            if !reserve_children(reader, remaining) {
+                return None;
+            }
+            if remaining > 0 {
+                stack.push(ParseFrame {
+                    node_index: child,
+                    remaining,
+                });
+            }
+        }
+    }
+
+    if reader.error() != Error::Ok {
+        None
+    } else {
+        Some(root)
+    }
+}
+
+fn compound_remaining(tag: Tag) -> Option<u32> {
+    match tag {
+        Tag::Array(count) => Some(count),
+        Tag::Map(count) => count.checked_mul(2),
+        _ => None,
+    }
+}
+
+fn parse_push_node(
+    reader: &mut Reader<'_>,
+    nodes: &mut Vec<NodeData>,
+    max_nodes: Option<usize>,
+) -> Option<usize> {
+    if !can_add_node(nodes, max_nodes) {
+        reader.flag_error(Error::TooBig);
+        return None;
+    }
     let tag = reader.read_tag()?;
     let payload_off = reader.used();
-    let mut children = Vec::new();
-
     match tag {
         Tag::Str(length) | Tag::Bin(length) | Tag::Ext { length, .. } => {
             if !reader.skip_bytes(length as usize) {
                 return None;
             }
         }
-        Tag::Array(count) => {
-            for _ in 0..count {
-                let child = parse_node(reader, nodes)?;
-                children.push(child);
-                if reader.error() != Error::Ok {
-                    return None;
-                }
-            }
-        }
         Tag::Map(count) => {
-            for _ in 0..count {
-                let key = parse_node(reader, nodes)?;
-                let value = parse_node(reader, nodes)?;
-                children.push(key);
-                children.push(value);
-                if reader.error() != Error::Ok {
-                    return None;
-                }
+            if count.checked_mul(2).is_none() {
+                reader.flag_error(Error::Invalid);
+                return None;
             }
         }
         _ => {}
     }
-
     let index = nodes.len();
     nodes.push(NodeData {
         tag,
         payload_off,
-        children,
+        children: Vec::new(),
     });
     Some(index)
 }
 
 impl<'tree, 'data> Node<'tree, 'data> {
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
+
     /// Returns the node's tag (even if the tree already has an error).
     pub fn tag(self) -> Tag {
         self.tree
@@ -242,13 +374,10 @@ impl<'tree, 'data> Node<'tree, 'data> {
         let node = self.tree.nodes.get(self.index)?;
         let start = node.payload_off;
         let end = start.saturating_add(length as usize);
-        self.tree
-            .data
-            .get(start..end)
-            .or_else(|| {
-                self.tree.flag_error(Error::Bug);
-                None
-            })
+        self.tree.data.get(start..end).or_else(|| {
+            self.tree.flag_error(Error::Bug);
+            None
+        })
     }
 
     /// Returns bin payload bytes; flags `Error::Type` when not a bin.
@@ -263,13 +392,10 @@ impl<'tree, 'data> Node<'tree, 'data> {
         let node = self.tree.nodes.get(self.index)?;
         let start = node.payload_off;
         let end = start.saturating_add(length as usize);
-        self.tree
-            .data
-            .get(start..end)
-            .or_else(|| {
-                self.tree.flag_error(Error::Bug);
-                None
-            })
+        self.tree.data.get(start..end).or_else(|| {
+            self.tree.flag_error(Error::Bug);
+            None
+        })
     }
 
     /// Returns `(ext_type, payload)`; flags `Error::Type` when not an ext.
@@ -311,7 +437,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Array element at `index`; flags type/data errors like C bounds checks.
-    pub fn array_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
+    pub fn array_at(self, index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -320,8 +446,11 @@ impl<'tree, 'data> Node<'tree, 'data> {
             return None;
         };
         let node = self.tree.nodes.get(self.index)?;
-        match node.children.get(_index).copied() {
-            Some(index) => Some(Node { tree: self.tree, index }),
+        match node.children.get(index).copied() {
+            Some(index) => Some(Node {
+                tree: self.tree,
+                index,
+            }),
             None => {
                 self.tree.flag_error(Error::Data);
                 None
@@ -338,11 +467,14 @@ impl<'tree, 'data> Node<'tree, 'data> {
             self.tree.flag_error(Error::Type);
             return None;
         };
-        self.tree.nodes.get(self.index).map(|node| node.children.len() / 2)
+        self.tree
+            .nodes
+            .get(self.index)
+            .map(|node| node.children.len() / 2)
     }
 
     /// Map key at entry `index`.
-    pub fn map_key_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
+    pub fn map_key_at(self, index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -351,9 +483,12 @@ impl<'tree, 'data> Node<'tree, 'data> {
             return None;
         };
         let node = self.tree.nodes.get(self.index)?;
-        let at = _index.saturating_mul(2);
+        let at = index.saturating_mul(2);
         match node.children.get(at).copied() {
-            Some(index) => Some(Node { tree: self.tree, index }),
+            Some(index) => Some(Node {
+                tree: self.tree,
+                index,
+            }),
             None => {
                 self.tree.flag_error(Error::Data);
                 None
@@ -362,7 +497,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Map value at entry `index`.
-    pub fn map_value_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
+    pub fn map_value_at(self, index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -371,9 +506,12 @@ impl<'tree, 'data> Node<'tree, 'data> {
             return None;
         };
         let node = self.tree.nodes.get(self.index)?;
-        let at = _index.saturating_mul(2).saturating_add(1);
+        let at = index.saturating_mul(2).saturating_add(1);
         match node.children.get(at).copied() {
-            Some(index) => Some(Node { tree: self.tree, index }),
+            Some(index) => Some(Node {
+                tree: self.tree,
+                index,
+            }),
             None => {
                 self.tree.flag_error(Error::Data);
                 None
@@ -384,7 +522,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
     /// Finds a map value whose key is unsigned/int equal to `key`.
     ///
     /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
-    pub fn map_uint(self, _key: u64) -> Option<Node<'tree, 'data>> {
+    pub fn map_uint(self, key: u64) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -403,8 +541,8 @@ impl<'tree, 'data> Node<'tree, 'data> {
                 .map(|n| n.tag)
                 .unwrap_or(Tag::Nil);
             let matches = match key_tag {
-                Tag::Uint(value) => value == _key,
-                Tag::Int(value) if value >= 0 => value as u64 == _key,
+                Tag::Uint(value) => value == key,
+                Tag::Int(value) if value >= 0 => value as u64 == key,
                 _ => false,
             };
             if matches {
@@ -421,7 +559,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
     /// Finds a map value whose key is a str with exact byte contents `key`.
     ///
     /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
-    pub fn map_str(self, _key: &[u8]) -> Option<Node<'tree, 'data>> {
+    pub fn map_str(self, key: &[u8]) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -444,7 +582,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
             let Some(bytes) = self.tree.data.get(start..end) else {
                 continue;
             };
-            if bytes == _key {
+            if bytes == key {
                 return Some(Node {
                     tree: self.tree,
                     index: value_index,
@@ -454,4 +592,23 @@ impl<'tree, 'data> Node<'tree, 'data> {
         self.tree.flag_error(Error::Data);
         None
     }
+}
+
+/// Byte-size gates for loading a whole file into a tree (C `mpack_file_tree_read`).
+///
+/// - `file_size < 0` → [`Error::Io`]
+/// - `file_size == 0` → [`Error::Invalid`] (empty file)
+/// - `max_bytes != 0 && size > max_bytes` → [`Error::TooBig`] (never truncate)
+pub fn check_file_tree_bytes(file_size: i64, max_bytes: usize) -> Result<usize, Error> {
+    if file_size < 0 {
+        return Err(Error::Io);
+    }
+    if file_size == 0 {
+        return Err(Error::Invalid);
+    }
+    let size = file_size as usize;
+    if max_bytes != 0 && size > max_bytes {
+        return Err(Error::TooBig);
+    }
+    Ok(size)
 }
