@@ -174,6 +174,7 @@ fn parse_tree(
         if !reserve_children(reader, remaining) {
             return None;
         }
+        nodes[root].children.reserve(remaining as usize);
         if remaining > 0 {
             stack.push(ParseFrame {
                 node_index: root,
@@ -198,6 +199,8 @@ fn parse_tree(
             if !reserve_children(reader, remaining) {
                 return None;
             }
+            // Reserve only after byte-budget checks so hostile counts cannot OOM.
+            nodes[child].children.reserve(remaining as usize);
             if remaining > 0 {
                 stack.push(ParseFrame {
                     node_index: child,
@@ -248,15 +251,10 @@ fn parse_push_node(
         _ => {}
     }
     let index = nodes.len();
-    let children = match tag {
-        Tag::Array(count) => Vec::with_capacity(count as usize),
-        Tag::Map(count) => Vec::with_capacity((count as usize).saturating_mul(2)),
-        _ => Vec::new(),
-    };
     nodes.push(NodeData {
         tag,
         payload_off,
-        children,
+        children: Vec::new(),
     });
     Some(index)
 }
