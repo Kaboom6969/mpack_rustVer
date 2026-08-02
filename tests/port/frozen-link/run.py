@@ -284,12 +284,17 @@ def main() -> int:
         )
     )
     parser.add_argument(
-        "--full",
+        "--embed-writer",
         action="store_true",
         help=(
-            "compile every frozen unit source under tests/original "
-            "(without this flag only frozen_nil_smoke.c runs — not the suite)"
+            "run the frozen C unit suite under the embed-writer config "
+            "(writer gate; without a suite flag only frozen_nil_smoke.c runs)"
         ),
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help=argparse.SUPPRESS,  # deprecated alias for --embed-writer
     )
     parser.add_argument(
         "--expect-missing",
@@ -300,8 +305,9 @@ def main() -> int:
         "--everything",
         action="store_true",
         help=(
-            "C everything config (reader/expect/node/stdio/compat/extensions) "
-            "with full-suite-abi; parity gate requires 0 failures"
+            "run the frozen C unit suite under the C everything config "
+            "(reader/expect/node/stdio/compat/extensions + full-suite-abi); "
+            "parity gate requires 0 failures"
         ),
     )
     parser.add_argument(
@@ -330,13 +336,28 @@ def main() -> int:
         )
     if args.everything and args.default_config:
         parser.error("use only one of --everything / --default-config")
-    full_suite = args.everything or args.default_config
-    if full_suite and not args.full:
-        parser.error("--everything / --default-config requires --full")
-    if args.soft_continue and not full_suite:
-        parser.error("--soft-continue requires --full --everything (or --default-config)")
+    everything = args.everything or args.default_config
+    if args.full:
+        # Old docs used `--full` (suite) and `--full --everything`.
+        # `--full` alone → embed-writer; with --everything → ignore --full.
+        if everything:
+            print(
+                "warning: --full is deprecated; `--everything` alone is enough.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning: --full is deprecated and misleading; use --embed-writer.",
+                file=sys.stderr,
+            )
+            args.embed_writer = True
+    if args.embed_writer and everything:
+        parser.error("use only one of --embed-writer / --everything")
+    run_frozen_suite = args.embed_writer or everything
+    if args.soft_continue and not everything:
+        parser.error("--soft-continue requires --everything (or --default-config)")
 
-    if full_suite:
+    if everything:
         # Build only the staticlib: a Windows cdylib cannot leave suite symbols
         # (test_malloc / mpack_assert_fail) undefined, but those must come from
         # the frozen C objects at final exe link.
@@ -367,9 +388,9 @@ def main() -> int:
     BUILD.mkdir(parents=True, exist_ok=True)
     output = rust_output(args.release)
 
-    # Full-suite modes link the staticlib so suite-provided symbols (test_malloc,
-    # mpack_assert_fail) resolve at final exe link. Embed-writer keeps cdylib.
-    if full_suite:
+    # Everything mode links the staticlib so suite-provided symbols (test_malloc,
+    # mpack_assert_fail) resolve at final exe link. Embed-writer / smoke keep cdylib.
+    if everything:
         library = static_library(output)
         link_static = True
     else:
@@ -380,7 +401,7 @@ def main() -> int:
             shutil.copy2(runtime_library, BUILD)
 
     profile = "release" if args.release else "debug"
-    if full_suite:
+    if everything:
         config_include = FROZEN_UNIT / "src"
         config_name = "everything"
         debug = True
@@ -391,7 +412,7 @@ def main() -> int:
         debug = False
         extra_defines = None
 
-    if args.full:
+    if run_frozen_suite:
         sources = sorted((FROZEN_UNIT / "src").glob("*.c"))
         executable = BUILD / f"{config_name}-{profile}-frozen"
     else:
@@ -400,7 +421,7 @@ def main() -> int:
     sources.append(ROOT / "original_c" / "mpack-develop" / "src" / "mpack" / "mpack-platform.c")
 
     soft_continue = bool(args.soft_continue)
-    if full_suite:
+    if everything:
         prepare_full_suite_extras(sources, soft_continue=soft_continue)
         ensure_unit_test_data_link()
 
@@ -419,7 +440,7 @@ def main() -> int:
     if result.returncode:
         return result.returncode
 
-    if args.full:
+    if run_frozen_suite:
         return run_suite_executable(executable, soft_continue=soft_continue)
     run([str(executable)])
     return 0
