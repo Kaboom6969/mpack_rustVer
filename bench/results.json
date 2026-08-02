@@ -1,644 +1,747 @@
 {
   "status": "measured",
-  "note": "C ABI fair compare: identical driver; everything features; forced tracking; libc malloc (Rust test_* identity wrappers); release opts. See bench/methodology.md.",
+  "note": "C ABI fair compare: identical driver; everything features; forced tracking; libc malloc (Rust test_* identity wrappers, post-link objdump gate); decode-only RSS in a fresh process (fixture pre-encoded); per-trial shuffled C/Rust order; release opts. See bench/methodology.md.",
   "environment": {
     "cpu": "Intel(R) Xeon(R) Processor",
     "os": "Linux-6.12.94+-x86_64-with-glibc2.39",
     "rustc": "rustc 1.83.0 (90b35a623 2024-11-26)",
     "rustc_verbose": "rustc 1.83.0 (90b35a623 2024-11-26)\nbinary: rustc\ncommit-hash: 90b35a6239c3d8bdabc530a6a0816f7ff89a0aaf\ncommit-date: 2024-11-26\nhost: x86_64-unknown-linux-gnu\nrelease: 1.83.0\nLLVM version: 19.1.1",
     "cc": "/usr/bin/gcc 13",
-    "commit": "bdfd56774a03db2668e7f87ad570944d8f643684",
+    "commit": "72a604de504a53820e79c6f2290f8d03cf0a788b",
     "define_lockstring": "MPACK_READER=1 MPACK_WRITER=1 MPACK_EXPECT=1 MPACK_NODE=1 MPACK_COMPATIBILITY=1 MPACK_EXTENSIONS=1 MPACK_STDLIB=1 MPACK_STDIO=1 MPACK_READ_TRACKING=1 MPACK_WRITE_TRACKING=1 MPACK_BUFFER_SIZE=4096 MPACK_TRACKING_INITIAL_CAPACITY=3 MPACK_MALLOC=malloc MPACK_FREE=free",
     "opt_flags": "C:-O2 -DNDEBUG -std=gnu11 -D_DEFAULT_SOURCE; Rust:cargo --release --features full-suite-abi",
     "taskset_cpu0": true,
     "trials": 5,
     "warmup": 100,
     "throughput_iters": 5000,
-    "latency_iters": 10000
+    "latency_iters": 10000,
+    "interleave_seed": 20260802,
+    "trial_order": "per-trial shuffled C/Rust (seeded)",
+    "allocator_gate": {
+      "tool": "objdump -d",
+      "test_malloc_refs_libc": true,
+      "test_free_refs_libc": true,
+      "test_malloc_snippet": [
+        "15bc0:\tf3 0f 1e fa          \tendbr64",
+        "   15bc4:\t48 85 ff             \ttest   %rdi,%rdi",
+        "   15bc7:\tb8 01 00 00 00       \tmov    $0x1,%eax",
+        "   15bcc:\t48 0f 44 f8          \tcmove  %rax,%rdi",
+        "   15bd0:\te9 6b a5 ff ff       \tjmp    10140 <malloc@plt>",
+        "   15bd5:\t66 66 2e 0f 1f 84 00 \tdata16 cs nopw 0x0(%rax,%rax,1)"
+      ],
+      "test_free_snippet": [
+        "15be0:\tf3 0f 1e fa          \tendbr64",
+        "   15be4:\te9 07 a5 ff ff       \tjmp    100f0 <free@plt>",
+        "   15be9:\t0f 1f 80 00 00 00 00 \tnopl   0x0(%rax)"
+      ]
+    },
+    "rss_mode": "decode_only_fresh_process"
   },
   "fixture_bytes": 509,
   "c_reference": {
     "binary": "target/bench/mpack_bench_c",
-    "encode_throughput_docs_per_s": 667794.883863,
-    "encode_throughput_mb_per_s": 324.161144,
+    "encode_throughput_docs_per_s": 660847.682539,
+    "encode_throughput_mb_per_s": 320.788832,
     "encode_throughput_trials": [
       {
         "metric": "encode_throughput",
-        "docs_per_s": 675669.649433,
-        "mb_per_s": 327.983715,
+        "docs_per_s": 657749.426147,
+        "mb_per_s": 319.284876,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 667794.883863,
-        "mb_per_s": 324.161144,
+        "docs_per_s": 660847.682539,
+        "mb_per_s": 320.788832,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 662696.232638,
-        "mb_per_s": 321.686156,
+        "docs_per_s": 660864.627697,
+        "mb_per_s": 320.797058,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 667700.801668,
-        "mb_per_s": 324.115475,
+        "docs_per_s": 651663.122488,
+        "mb_per_s": 316.330461,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 669740.32828,
-        "mb_per_s": 325.105502,
+        "docs_per_s": 665313.330644,
+        "mb_per_s": 322.956548,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "decode_reader_throughput_docs_per_s": 802481.400889,
-    "decode_reader_throughput_mb_per_s": 389.540704,
+    "decode_reader_throughput_docs_per_s": 801763.623407,
+    "decode_reader_throughput_mb_per_s": 389.19228,
     "decode_reader_throughput_trials": [
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 806203.250289,
-        "mb_per_s": 391.347365,
+        "docs_per_s": 805672.579498,
+        "mb_per_s": 391.089766,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 795587.734074,
-        "mb_per_s": 386.194379,
+        "docs_per_s": 799144.723351,
+        "mb_per_s": 387.921013,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 806666.420365,
-        "mb_per_s": 391.572197,
+        "docs_per_s": 779755.549754,
+        "mb_per_s": 378.509116,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 802481.400889,
-        "mb_per_s": 389.540704,
+        "docs_per_s": 802995.881274,
+        "mb_per_s": 389.790443,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 783222.128845,
-        "mb_per_s": 380.191864,
+        "docs_per_s": 801763.623407,
+        "mb_per_s": 389.19228,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "decode_node_throughput_docs_per_s": 1325851.99249,
-    "decode_node_throughput_mb_per_s": 643.595375,
+    "decode_node_throughput_docs_per_s": 1373136.345024,
+    "decode_node_throughput_mb_per_s": 666.548156,
     "decode_node_throughput_trials": [
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 1309043.421756,
-        "mb_per_s": 635.436155,
+        "docs_per_s": 1383366.183669,
+        "mb_per_s": 671.513927,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 1325851.99249,
-        "mb_per_s": 643.595375,
+        "docs_per_s": 1373136.345024,
+        "mb_per_s": 666.548156,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 1334328.564532,
-        "mb_per_s": 647.710075,
+        "docs_per_s": 1374496.762373,
+        "mb_per_s": 667.20853,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 1337665.228409,
-        "mb_per_s": 649.329759,
+        "docs_per_s": 1333402.31468,
+        "mb_per_s": 647.260454,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 1306040.227084,
-        "mb_per_s": 633.978344,
+        "docs_per_s": 1341034.087477,
+        "mb_per_s": 650.965071,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "encode_p50_ns": 1504,
-    "encode_p99_ns": 1556,
-    "encode_max_ns": 28397,
+    "encode_p50_ns": 1535,
+    "encode_p99_ns": 1624,
+    "encode_max_ns": 25499,
     "encode_latency_trials": [
       {
         "metric": "encode_latency",
-        "p50_ns": 1494,
-        "p99_ns": 1537,
-        "max_ns": 33326,
+        "p50_ns": 1537,
+        "p99_ns": 1811,
+        "max_ns": 21563,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
+      },
+      {
+        "metric": "encode_latency",
+        "p50_ns": 1515,
+        "p99_ns": 1606,
+        "max_ns": 43509,
+        "iters": 10000,
+        "trial": 1,
+        "side": "c"
+      },
+      {
+        "metric": "encode_latency",
+        "p50_ns": 1535,
+        "p99_ns": 1667,
+        "max_ns": 17017,
+        "iters": 10000,
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "encode_latency",
         "p50_ns": 1505,
-        "p99_ns": 1675,
-        "max_ns": 28397,
+        "p99_ns": 1600,
+        "max_ns": 25499,
         "iters": 10000,
-        "trial": 1
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "encode_latency",
-        "p50_ns": 1504,
-        "p99_ns": 1938,
-        "max_ns": 28010,
+        "p50_ns": 1537,
+        "p99_ns": 1624,
+        "max_ns": 30264,
         "iters": 10000,
-        "trial": 2
-      },
-      {
-        "metric": "encode_latency",
-        "p50_ns": 1498,
-        "p99_ns": 1552,
-        "max_ns": 30314,
-        "iters": 10000,
-        "trial": 3
-      },
-      {
-        "metric": "encode_latency",
-        "p50_ns": 1511,
-        "p99_ns": 1556,
-        "max_ns": 13105,
-        "iters": 10000,
-        "trial": 4
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "decode_reader_p50_ns": 1274,
-    "decode_reader_p99_ns": 1332,
-    "decode_reader_max_ns": 32258,
+    "decode_reader_p50_ns": 1261,
+    "decode_reader_p99_ns": 1309,
+    "decode_reader_max_ns": 27061,
     "decode_reader_latency_trials": [
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1289,
-        "p99_ns": 1332,
-        "max_ns": 33238,
+        "p50_ns": 1258,
+        "p99_ns": 1309,
+        "max_ns": 12700,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1274,
-        "p99_ns": 1320,
-        "max_ns": 26961,
+        "p50_ns": 1266,
+        "p99_ns": 1310,
+        "max_ns": 27240,
         "iters": 10000,
-        "trial": 1
-      },
-      {
-        "metric": "decode_reader_latency",
-        "p50_ns": 1293,
-        "p99_ns": 1334,
-        "max_ns": 12679,
-        "iters": 10000,
-        "trial": 2
-      },
-      {
-        "metric": "decode_reader_latency",
-        "p50_ns": 1263,
-        "p99_ns": 1300,
-        "max_ns": 41068,
-        "iters": 10000,
-        "trial": 3
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "decode_reader_latency",
         "p50_ns": 1253,
-        "p99_ns": 1339,
-        "max_ns": 32258,
+        "p99_ns": 1308,
+        "max_ns": 27061,
         "iters": 10000,
-        "trial": 4
+        "trial": 2,
+        "side": "c"
+      },
+      {
+        "metric": "decode_reader_latency",
+        "p50_ns": 1262,
+        "p99_ns": 1317,
+        "max_ns": 35191,
+        "iters": 10000,
+        "trial": 3,
+        "side": "c"
+      },
+      {
+        "metric": "decode_reader_latency",
+        "p50_ns": 1261,
+        "p99_ns": 1306,
+        "max_ns": 18438,
+        "iters": 10000,
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "decode_node_p50_ns": 768,
-    "decode_node_p99_ns": 831,
-    "decode_node_max_ns": 27314,
+    "decode_node_p50_ns": 734,
+    "decode_node_p99_ns": 798,
+    "decode_node_max_ns": 16096,
     "decode_node_latency_trials": [
       {
         "metric": "decode_node_latency",
-        "p50_ns": 769,
-        "p99_ns": 831,
-        "max_ns": 26399,
+        "p50_ns": 737,
+        "p99_ns": 798,
+        "max_ns": 9364,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 766,
-        "p99_ns": 835,
-        "max_ns": 30241,
+        "p50_ns": 734,
+        "p99_ns": 793,
+        "max_ns": 15957,
         "iters": 10000,
-        "trial": 1
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 770,
-        "p99_ns": 832,
-        "max_ns": 32672,
+        "p50_ns": 732,
+        "p99_ns": 796,
+        "max_ns": 16096,
         "iters": 10000,
-        "trial": 2
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 768,
-        "p99_ns": 830,
-        "max_ns": 27314,
+        "p50_ns": 732,
+        "p99_ns": 836,
+        "max_ns": 18269,
         "iters": 10000,
-        "trial": 3
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 765,
-        "p99_ns": 825,
-        "max_ns": 18534,
+        "p50_ns": 738,
+        "p99_ns": 807,
+        "max_ns": 1535352,
         "iters": 10000,
-        "trial": 4
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "rss_peak_bytes": 86454272,
+    "rss_peak_bytes": 87412736,
     "rss_fixture_bytes": 16777152,
+    "rss_mode": "decode_only",
     "rss_trials": [
       {
         "metric": "rss",
-        "peak_bytes": 86343680,
+        "peak_bytes": 87412736,
         "fixture_bytes": 16777152,
-        "trial": 0
+        "mode": "decode_only",
+        "trial": 0,
+        "side": "c"
       },
       {
         "metric": "rss",
-        "peak_bytes": 86384640,
+        "peak_bytes": 87412736,
         "fixture_bytes": 16777152,
-        "trial": 1
+        "mode": "decode_only",
+        "trial": 1,
+        "side": "c"
       },
       {
         "metric": "rss",
-        "peak_bytes": 86523904,
+        "peak_bytes": 87412736,
         "fixture_bytes": 16777152,
-        "trial": 2
+        "mode": "decode_only",
+        "trial": 2,
+        "side": "c"
       },
       {
         "metric": "rss",
-        "peak_bytes": 86511616,
+        "peak_bytes": 87412736,
         "fixture_bytes": 16777152,
-        "trial": 3
+        "mode": "decode_only",
+        "trial": 3,
+        "side": "c"
       },
       {
         "metric": "rss",
-        "peak_bytes": 86454272,
+        "peak_bytes": 87412736,
         "fixture_bytes": 16777152,
-        "trial": 4
+        "mode": "decode_only",
+        "trial": 4,
+        "side": "c"
       }
     ],
-    "startup_ms": 1.1244239999541605,
+    "startup_ms": 0.9886089999326941,
     "startup_trials_ms": [
-      1.128735000065717,
-      1.1244239999541605,
-      0.9840949999215809,
-      1.4128059999620746,
-      1.0147110000389148
+      1.0933150001619651,
+      0.9772769999472075,
+      0.9332480001376098,
+      0.9886089999326941,
+      1.261956000007558
     ]
   },
   "rust_port": {
     "binary": "target/bench/mpack_bench_rust",
-    "encode_throughput_docs_per_s": 258947.70489,
-    "encode_throughput_mb_per_s": 125.698454,
+    "encode_throughput_docs_per_s": 256321.464026,
+    "encode_throughput_mb_per_s": 124.423623,
     "encode_throughput_trials": [
       {
         "metric": "encode_throughput",
-        "docs_per_s": 250366.887637,
-        "mb_per_s": 121.533151,
+        "docs_per_s": 248546.178836,
+        "mb_per_s": 120.649343,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 258703.309679,
-        "mb_per_s": 125.579819,
+        "docs_per_s": 246659.916407,
+        "mb_per_s": 119.733713,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 259701.918293,
-        "mb_per_s": 126.064564,
+        "docs_per_s": 256437.899101,
+        "mb_per_s": 124.480143,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 260166.771063,
-        "mb_per_s": 126.290213,
+        "docs_per_s": 256824.956277,
+        "mb_per_s": 124.668029,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "encode_throughput",
-        "docs_per_s": 258947.70489,
-        "mb_per_s": 125.698454,
+        "docs_per_s": 256321.464026,
+        "mb_per_s": 124.423623,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "decode_reader_throughput_docs_per_s": 527386.43946,
-    "decode_reader_throughput_mb_per_s": 256.004045,
+    "decode_reader_throughput_docs_per_s": 575095.644157,
+    "decode_reader_throughput_mb_per_s": 279.163058,
     "decode_reader_throughput_trials": [
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 522812.833424,
-        "mb_per_s": 253.783924,
+        "docs_per_s": 579012.577427,
+        "mb_per_s": 281.064417,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 529626.232175,
-        "mb_per_s": 257.091286,
+        "docs_per_s": 571511.391594,
+        "mb_per_s": 277.423189,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 527386.43946,
-        "mb_per_s": 256.004045,
+        "docs_per_s": 575095.644157,
+        "mb_per_s": 279.163058,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 525817.757034,
-        "mb_per_s": 255.242575,
+        "docs_per_s": 578323.643328,
+        "mb_per_s": 280.729994,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_throughput",
-        "docs_per_s": 531604.58358,
-        "mb_per_s": 258.051618,
+        "docs_per_s": 573511.565434,
+        "mb_per_s": 278.394114,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "decode_node_throughput_docs_per_s": 295604.048546,
-    "decode_node_throughput_mb_per_s": 143.492184,
+    "decode_node_throughput_docs_per_s": 299180.216289,
+    "decode_node_throughput_mb_per_s": 145.228129,
     "decode_node_throughput_trials": [
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 301264.945227,
-        "mb_per_s": 146.240098,
+        "docs_per_s": 296402.210686,
+        "mb_per_s": 143.879628,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 295020.374697,
-        "mb_per_s": 143.208857,
+        "docs_per_s": 299180.216289,
+        "mb_per_s": 145.228129,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 295604.048546,
-        "mb_per_s": 143.492184,
+        "docs_per_s": 301100.794394,
+        "mb_per_s": 146.160416,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 291487.792754,
-        "mb_per_s": 141.494071,
+        "docs_per_s": 296719.898019,
+        "mb_per_s": 144.03384,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "decode_node_throughput",
-        "docs_per_s": 301918.109906,
-        "mb_per_s": 146.557157,
+        "docs_per_s": 305928.09099,
+        "mb_per_s": 148.503683,
         "bytes_per_doc": 509,
         "iters": 5000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "encode_p50_ns": 3754,
-    "encode_p99_ns": 5072,
-    "encode_max_ns": 55679,
+    "encode_p50_ns": 3870,
+    "encode_p99_ns": 5254,
+    "encode_max_ns": 53167,
     "encode_latency_trials": [
       {
         "metric": "encode_latency",
-        "p50_ns": 3781,
-        "p99_ns": 5072,
-        "max_ns": 47337,
+        "p50_ns": 3881,
+        "p99_ns": 5559,
+        "max_ns": 46167,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "encode_latency",
-        "p50_ns": 3782,
-        "p99_ns": 5219,
-        "max_ns": 67659,
+        "p50_ns": 3870,
+        "p99_ns": 5293,
+        "max_ns": 63050,
         "iters": 10000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "encode_latency",
-        "p50_ns": 3754,
-        "p99_ns": 5165,
-        "max_ns": 51929,
+        "p50_ns": 3761,
+        "p99_ns": 5057,
+        "max_ns": 49503,
         "iters": 10000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "encode_latency",
-        "p50_ns": 3740,
-        "p99_ns": 5032,
-        "max_ns": 55679,
+        "p50_ns": 3786,
+        "p99_ns": 5115,
+        "max_ns": 53167,
         "iters": 10000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "encode_latency",
-        "p50_ns": 3737,
-        "p99_ns": 4959,
-        "max_ns": 56535,
+        "p50_ns": 3953,
+        "p99_ns": 5254,
+        "max_ns": 58003,
         "iters": 10000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "decode_reader_p50_ns": 1909,
-    "decode_reader_p99_ns": 2653,
-    "decode_reader_max_ns": 29934,
+    "decode_reader_p50_ns": 1755,
+    "decode_reader_p99_ns": 2535,
+    "decode_reader_max_ns": 28953,
     "decode_reader_latency_trials": [
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1901,
-        "p99_ns": 2622,
-        "max_ns": 29012,
+        "p50_ns": 1757,
+        "p99_ns": 2531,
+        "max_ns": 31948,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1920,
-        "p99_ns": 2653,
-        "max_ns": 42516,
+        "p50_ns": 1755,
+        "p99_ns": 2544,
+        "max_ns": 30181,
         "iters": 10000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1900,
-        "p99_ns": 2653,
-        "max_ns": 45344,
+        "p50_ns": 1742,
+        "p99_ns": 2535,
+        "max_ns": 28953,
         "iters": 10000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1909,
-        "p99_ns": 2655,
-        "max_ns": 29934,
+        "p50_ns": 1745,
+        "p99_ns": 2524,
+        "max_ns": 28805,
         "iters": 10000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "decode_reader_latency",
-        "p50_ns": 1912,
-        "p99_ns": 2662,
-        "max_ns": 27390,
+        "p50_ns": 1763,
+        "p99_ns": 2539,
+        "max_ns": 17149,
         "iters": 10000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "decode_node_p50_ns": 3361,
-    "decode_node_p99_ns": 4066,
-    "decode_node_max_ns": 30529,
+    "decode_node_p50_ns": 3265,
+    "decode_node_p99_ns": 3819,
+    "decode_node_max_ns": 33385,
     "decode_node_latency_trials": [
       {
         "metric": "decode_node_latency",
-        "p50_ns": 3431,
-        "p99_ns": 4066,
-        "max_ns": 20065,
+        "p50_ns": 3295,
+        "p99_ns": 3774,
+        "max_ns": 39366,
         "iters": 10000,
-        "trial": 0
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 3361,
-        "p99_ns": 3985,
-        "max_ns": 45010,
+        "p50_ns": 3250,
+        "p99_ns": 3877,
+        "max_ns": 32354,
         "iters": 10000,
-        "trial": 1
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 3478,
-        "p99_ns": 4093,
-        "max_ns": 28201,
+        "p50_ns": 3265,
+        "p99_ns": 3819,
+        "max_ns": 39533,
         "iters": 10000,
-        "trial": 2
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 3337,
-        "p99_ns": 3953,
-        "max_ns": 30529,
+        "p50_ns": 3254,
+        "p99_ns": 3785,
+        "max_ns": 32708,
         "iters": 10000,
-        "trial": 3
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "decode_node_latency",
-        "p50_ns": 3338,
-        "p99_ns": 4155,
-        "max_ns": 32081,
+        "p50_ns": 3366,
+        "p99_ns": 4085,
+        "max_ns": 33385,
         "iters": 10000,
-        "trial": 4
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "rss_peak_bytes": 402927616,
+    "rss_peak_bytes": 386080768,
     "rss_fixture_bytes": 16777152,
+    "rss_mode": "decode_only",
     "rss_trials": [
       {
         "metric": "rss",
-        "peak_bytes": 402919424,
+        "peak_bytes": 386080768,
         "fixture_bytes": 16777152,
-        "trial": 0
+        "mode": "decode_only",
+        "trial": 0,
+        "side": "rust"
       },
       {
         "metric": "rss",
-        "peak_bytes": 402829312,
+        "peak_bytes": 386228224,
         "fixture_bytes": 16777152,
-        "trial": 1
+        "mode": "decode_only",
+        "trial": 1,
+        "side": "rust"
       },
       {
         "metric": "rss",
-        "peak_bytes": 402927616,
+        "peak_bytes": 386109440,
         "fixture_bytes": 16777152,
-        "trial": 2
+        "mode": "decode_only",
+        "trial": 2,
+        "side": "rust"
       },
       {
         "metric": "rss",
-        "peak_bytes": 402927616,
+        "peak_bytes": 386019328,
         "fixture_bytes": 16777152,
-        "trial": 3
+        "mode": "decode_only",
+        "trial": 3,
+        "side": "rust"
       },
       {
         "metric": "rss",
-        "peak_bytes": 403005440,
+        "peak_bytes": 386052096,
         "fixture_bytes": 16777152,
-        "trial": 4
+        "mode": "decode_only",
+        "trial": 4,
+        "side": "rust"
       }
     ],
-    "startup_ms": 1.2577219999911904,
+    "startup_ms": 1.1865050000778865,
     "startup_trials_ms": [
-      1.210804000038479,
-      1.3560339999685311,
-      1.2577219999911904,
-      1.1422400000355992,
-      1.4378549999491952
+      1.6104220001125213,
+      0.983505000021978,
+      1.1865050000778865,
+      1.1269230001289543,
+      1.9968039998730092
     ]
   }
 }
