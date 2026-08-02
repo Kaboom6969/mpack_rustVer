@@ -40,8 +40,8 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Writer FFI surface | `src/ffi/writer.rs` | Fixed buffer, growable (suite allocator under everything), flush / error / teardown callbacks, filename/stdfile, compound start/build/complete, timestamps/ext, UTF-8 helpers. |
 | Builder page storage | Rust side-table (`Mutex<HashMap<usize, …>>` keyed by writer pointer); ABI `builder` field left empty for layout | C stores builder pages inside `mpack_writer_t.builder`. The side-table keeps compound-size resolution without growing unsafe fields inside the C struct. Observable if C inspects builder pointers. |
 | Write-tracking hooks | Real FFI tracking under `full-suite-abi` | Initializes the ABI track stack and wires element, byte, compound, and builder push/pop checks through `src/ffi/stubs/track.rs`, including frozen-suite `mpack_break_hit` semantics. |
-| Embed-writer gate | `python3 tests/port/frozen-link/run.py --full` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` and exit 0 (C harness verdict; see team ownership rules). |
-| Everything gate | `python3 tests/port/frozen-link/run.py --full --everything` | Reader/Expect/Node (and related) acceptance: same C harness verdict under everything + `full-suite-abi`. Runner must not map failures to success. |
+| Embed-writer gate | `python3 tests/port/frozen-link/run.py --embed-writer` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` and exit 0 (C harness verdict; see team ownership rules). |
+| Everything gate | `python3 tests/port/frozen-link/run.py --everything` | Reader/Expect/Node (and related) acceptance: same C harness verdict under everything + `full-suite-abi`. Runner must not map failures to success. |
 
 ## Reader vertical slice
 
@@ -62,7 +62,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Safe-core shape | Free functions on `&mut Reader<'_>`; `ExpectCompound { is_nil, count }` for `*_or_nil` | Mirrors `mpack_expect_*(reader)` without a second parser; FFI can map to C `(bool, *count)` without inventing another shape. |
 | Rust keywords | `r#bool` / `r#str`; `true_` / `false_` | Locked names for C `mpack_expect_bool` / `mpack_expect_str` / true/false expects. |
 | Allocator-backed expects | Stay in FFI only (`*_alloc`, `char*` copies) | Safe core must not return allocator-owned pointers; teammates fill `src/expect.rs` bodies only. |
-| Expect C ABI under `full-suite-abi` | `src/ffi/expect.rs` (replaces stubs) | Reuses Reader `read_with_core` / `ensure_*`; scalar paths via `expect_op!`; `*_alloc` stay FFI-only (`test_malloc` + `mpack_read_bytes_alloc_impl`). Gate: `test-expect.c` 0 failures under `--full --everything`. |
+| Expect C ABI under `full-suite-abi` | `src/ffi/expect.rs` (replaces stubs) | Reuses Reader `read_with_core` / `ensure_*`; scalar paths via `expect_op!`; `*_alloc` stay FFI-only (`test_malloc` + `mpack_read_bytes_alloc_impl`). Gate: `test-expect.c` 0 failures under `--everything`. |
 | Range expects on error | Return `min_value` (C parity); `mpack_assert_fail` if min > max | Matches `mpack-expect.c` / suite assert harness, not “zero on error”. |
 | `double_strict` | Accepts float as well as double | C `mpack_expect_double_strict` promotes float; safe core aligned for FFI parity. |
 
@@ -128,7 +128,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 - **MPack**: Pointer-rich `mpack_expect_*` / `mpack_node_*` / pools / `*_alloc` / `char*` copies.
 - **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node stays the minimal locked `Tree` / `Node` list. Allocation and C string copies stay in `src/ffi/`.
-- **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; gate `test-node.c` under `--full --everything`.
+- **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; gate `test-node.c` under `--everything`.
 - **Signature changes** to locked safe-core exports require lead approval and a row in the Expect / Node tables above.
 
 ## Explicit non-goals (for now)

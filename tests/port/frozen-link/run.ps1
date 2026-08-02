@@ -1,5 +1,6 @@
 param(
-    [switch]$Full,
+    [switch]$EmbedWriter,
+    [switch]$Full, # deprecated alias for -EmbedWriter
     [switch]$ExpectMissing,
     [switch]$Everything,
     [switch]$DefaultConfig,
@@ -15,12 +16,21 @@ if ($ExpectMissing) {
 if ($Everything -and $DefaultConfig) {
     throw "Use only one of -Everything / -DefaultConfig."
 }
-$FullSuite = $Everything -or $DefaultConfig
-if ($FullSuite -and -not $Full) {
-    throw "-Everything / -DefaultConfig requires -Full."
+$EverythingMode = $Everything -or $DefaultConfig
+if ($Full) {
+    if ($EverythingMode) {
+        Write-Warning "-Full is deprecated; -Everything alone is enough."
+    } else {
+        Write-Warning "-Full is deprecated and misleading; use -EmbedWriter."
+        $EmbedWriter = $true
+    }
 }
-if ($SoftContinue -and -not $FullSuite) {
-    throw "-SoftContinue requires -Full -Everything (or -DefaultConfig)."
+if ($EmbedWriter -and $EverythingMode) {
+    throw "Use only one of -EmbedWriter / -Everything."
+}
+$RunFrozenSuite = $EmbedWriter -or $EverythingMode
+if ($SoftContinue -and -not $EverythingMode) {
+    throw "-SoftContinue requires -Everything (or -DefaultConfig)."
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -55,7 +65,7 @@ if (-not (Get-Command $Compiler -ErrorAction SilentlyContinue) -and -not (Test-P
     throw "C compiler '$Compiler' was not found. Set CC to a GCC-compatible compiler."
 }
 
-if ($FullSuite) {
+if ($EverythingMode) {
     # staticlib only: Windows cdylib cannot leave suite symbols undefined.
     $CargoArguments = @("rustc", "--target", $RustTarget)
     if ($Release) {
@@ -82,7 +92,7 @@ New-Item -ItemType Directory -Force -Path $Build | Out-Null
 $Profile = if ($Release) { "release" } else { "debug" }
 $RustOutput = Join-Path $CargoTarget "$RustTarget\$Profile"
 
-if ($FullSuite) {
+if ($EverythingMode) {
     $Library = @(
         (Join-Path $RustOutput "libmpack.a"),
         (Join-Path $RustOutput "mpack.lib")
@@ -105,7 +115,7 @@ if ($FullSuite) {
     }
 }
 
-if ($FullSuite) {
+if ($EverythingMode) {
     $ConfigInclude = Join-Path $FrozenUnit "src"
     $ConfigName = "everything"
     $DebugDefine = @("-DDEBUG")
@@ -117,7 +127,7 @@ if ($FullSuite) {
     $ExtraDefines = @()
 }
 
-if ($Full) {
+if ($RunFrozenSuite) {
     $Sources = Get-ChildItem (Join-Path $FrozenUnit "src") -Filter "*.c" | Sort-Object Name | ForEach-Object FullName
     $Output = Join-Path $Build "$ConfigName-$Profile-frozen.exe"
 } else {
@@ -126,7 +136,7 @@ if ($Full) {
 }
 $Sources += Join-Path $Root "original_c\mpack-develop\src\mpack\mpack-platform.c"
 
-if ($FullSuite) {
+if ($EverythingMode) {
     $Sources += Join-Path $PSScriptRoot "c\full_layout_check.c"
     if ($SoftContinue) {
         $Sources += Join-Path $PSScriptRoot "c\soft_abort.c"
@@ -146,7 +156,7 @@ static void __attribute__((constructor)) mpack_run_layout_check(void) {
 }
 
 $NativeStaticLibs = @()
-if ($FullSuite) {
+if ($EverythingMode) {
     $NativeStaticLibs = @(
         "-lkernel32",
         "-lntdll",
@@ -177,7 +187,7 @@ if ($SoftContinue) {
     )
 }
 $Arguments += $Sources + @($Library) + $NativeStaticLibs
-if ($FullSuite) {
+if ($EverythingMode) {
     # Retained only for staticlib + mpack-platform.c vs Rust #[no_mangle] overlap.
     $Arguments += "-Wl,--allow-multiple-definition"
 }
@@ -188,7 +198,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-if (-not $Full) {
+if (-not $RunFrozenSuite) {
     # Nil smoke only — not the frozen unit suite.
     & $Output
     exit $LASTEXITCODE
