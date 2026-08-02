@@ -13,7 +13,7 @@ Be defect-first: find real bugs, ABI breaks, and test-suite risks. Skip style ni
 1. **Frozen tests touched**: any change under `tests/original/` (or equivalent frozen C suite) is a blocker.
 2. **ABI / header drift**: `include/**` structs, enums, constants, or exported symbol names/signatures diverge from original C without a documented reason in `DECISIONS.md`.
 3. **Allocator contract break**: C-visible pointers allocated with Rust global allocator, or freed with the wrong hook/`free`.
-4. **Unsafe sprawl**: new `unsafe` in core parse/encode paths without a clear `# Safety` boundary; prefer unsafe confined to FFI/node modules.
+4. **Unsafe sprawl**: new `unsafe` outside `src/ffi/**`, or in `forbid(unsafe_code)` modules (`common` / `writer` / `reader` / `expect` / `node`); raw pointers and `# Safety` contracts belong only under `src/ffi/`.
 5. **Silent behavior change**: NULL/error sticky-state, depth limits, UTF-8, float/int width, or MessagePack/JSON edge cases changed without tests + `DECISIONS.md`.
 6. **Lane claims done without module gate**: reader/expect/node/writer PRs that assert completion without evidence that the matching frozen `test-*.c` (see `team-ownership`) has **0 failures** under the lane’s frozen-link command.
 
