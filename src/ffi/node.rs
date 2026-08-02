@@ -104,6 +104,12 @@ fn remove_state(tree: *mut MpackTree) -> Option<FfiTreeState> {
     ffi_trees().lock().ok()?.remove(&(tree as usize))
 }
 
+fn has_state(tree: *mut MpackTree) -> bool {
+    ffi_trees()
+        .lock()
+        .is_ok_and(|map| map.contains_key(&(tree as usize)))
+}
+
 fn with_state<T>(tree: *mut MpackTree, default: T, f: impl FnOnce(&mut FfiTreeState) -> T) -> T {
     let Ok(mut map) = ffi_trees().lock() else {
         return default;
@@ -124,6 +130,26 @@ fn assert_fail(msg: &[u8]) {
     unsafe { mpack_assert_fail(msg.as_ptr().cast()) };
 }
 
+/// Revoke all ABI parse views before dropping or replacing their side-table
+/// owners. `t.root` must never outlive `heap_nodes`.
+fn clear_abi_parse_views(tree: *mut MpackTree) {
+    if tree.is_null() {
+        return;
+    }
+    let t = unsafe { &mut *tree };
+    t.root = ptr::addr_of_mut!(t.nil_node);
+    t.size = 0;
+    t.node_count = 0;
+    t.parser = MpackTreeParser::empty();
+    with_state(tree, (), |s| {
+        s.nodes.clear();
+        s.root = None;
+        s.size = 0;
+        s.parsed = false;
+        s.heap_nodes = Box::new([]);
+    });
+}
+
 /// Advances past a previously parsed message (multi-`parse` on one tree).
 fn advance_previous_message(tree: *mut MpackTree) {
     let t = unsafe { &mut *tree };
@@ -131,6 +157,8 @@ fn advance_previous_message(tree: *mut MpackTree) {
     if size == 0 {
         return;
     }
+    // Revoke the heap-backed root before clearing its owner below.
+    t.root = ptr::addr_of_mut!(t.nil_node);
     with_state(tree, (), |s| {
         if !s.owned_data.is_empty() {
             let drain = size.min(s.owned_data.len());
@@ -149,8 +177,7 @@ fn advance_previous_message(tree: *mut MpackTree) {
     });
     t.size = 0;
     t.node_count = 0;
-    t.root = ptr::addr_of_mut!(t.nil_node);
-    t.parser.state = 0;
+    t.parser = MpackTreeParser::empty();
 }
 
 fn flag_tree_error(tree: *mut MpackTree, error: MpackError) {
@@ -386,6 +413,11 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
     if tree_error(tree) != MPACK_OK {
         return false;
     }
+    if !has_state(tree) {
+        clear_abi_parse_views(tree);
+        flag_tree_error(tree, MPACK_ERROR_BUG);
+        return false;
+    }
     let t_ref = unsafe { &*tree };
 
     let (max_nodes, using_pool, pool_count) = with_state(
@@ -421,45 +453,24 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
     let abi_error = core_error_to_abi(error);
     let node_count = nodes.len();
 
-    // Update tree fields
-    {
-        let t = unsafe { &mut *tree };
-        t.size = size;
-        t.node_count = node_count;
-        t.parser.state = 2; // mpack_tree_parse_state_parsed
-    }
-
     if abi_error != MPACK_OK {
-        with_state(tree, (), |s| {
-            s.nodes = Vec::new();
-            s.root = None;
-            s.size = 0;
-            s.parsed = true;
-        });
-        let t = unsafe { &mut *tree };
-        t.root = ptr::addr_of_mut!(t.nil_node);
+        clear_abi_parse_views(tree);
         flag_tree_error(tree, abi_error);
         return false;
     }
 
     if using_pool {
         // Write into user-provided pool
-        let t = unsafe { &mut *tree };
         if node_count > pool_count {
-            with_state(tree, (), |s| {
-                s.nodes = Vec::new();
-                s.root = None;
-                s.parsed = true;
-            });
-            t.root = ptr::addr_of_mut!(t.nil_node);
+            clear_abi_parse_views(tree);
             flag_tree_error(tree, MPACK_ERROR_TOO_BIG);
             return false;
         }
-        let pool = t.pool;
+        let pool = unsafe { (*tree).pool };
         if !pool.is_null() {
             // SAFETY: pool has pool_count elements; we wrote node_count <= pool_count
             unsafe { materialize_nodes(&nodes, root.unwrap_or(0), pool) };
-            t.root = pool; // root is at index 0 after BFS
+            unsafe { (*tree).root = pool }; // root is at index 0 after BFS
         }
         with_state(tree, (), |s| {
             s.nodes = nodes;
@@ -467,6 +478,10 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
             s.size = size;
             s.parsed = true;
         });
+        let t = unsafe { &mut *tree };
+        t.size = size;
+        t.node_count = node_count;
+        t.parser.state = 2; // mpack_tree_parse_state_parsed
     } else {
         // Write into heap-allocated Box
         let mut heap = vec![MpackNodeData::nil(); node_count.max(1)].into_boxed_slice();
@@ -474,22 +489,31 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
             // SAFETY: heap has node_count elements
             unsafe { materialize_nodes(&nodes, root.unwrap_or(0), heap.as_mut_ptr()) };
         }
-        let root_ptr = if node_count > 0 {
-            heap.as_mut_ptr()
-        } else {
-            ptr::addr_of_mut!(unsafe { &mut *tree }.nil_node)
-        };
-        {
-            let t = unsafe { &mut *tree };
-            t.root = root_ptr;
-        }
-        with_state(tree, (), |s| {
+        // Publish the side-table owner and the ABI root together. If state
+        // disappears or its mutex is poisoned, `heap` drops locally while the
+        // tree stays on its nil sentinel and fails closed below.
+        let published = with_state(tree, false, |s| {
             s.nodes = nodes;
             s.root = root;
             s.size = size;
             s.parsed = true;
             s.heap_nodes = heap;
+            let t = unsafe { &mut *tree };
+            t.root = if node_count > 0 {
+                s.heap_nodes.as_mut_ptr()
+            } else {
+                ptr::addr_of_mut!(t.nil_node)
+            };
+            t.size = size;
+            t.node_count = node_count;
+            t.parser.state = 2; // mpack_tree_parse_state_parsed
+            true
         });
+        if !published {
+            clear_abi_parse_views(tree);
+            flag_tree_error(tree, MPACK_ERROR_BUG);
+            return false;
+        }
     }
 
     true
@@ -743,14 +767,17 @@ pub unsafe extern "C" fn mpack_tree_init_filename(
         init_tree_clear(tree);
         match load_file_data(file, max_bytes) {
             Ok(data) => {
-                let data_ptr = data.as_ptr().cast::<c_char>();
-                let data_len = data.len();
-                with_state(tree, (), |s| {
+                let stored = with_state(tree, false, |s| {
                     s.owned_data = data;
+                    let t = unsafe { &mut *tree };
+                    t.data = s.owned_data.as_ptr().cast();
+                    t.data_length = s.owned_data.len();
+                    true
                 });
-                let t = unsafe { &mut *tree };
-                t.data = data_ptr;
-                t.data_length = data_len;
+                if !stored {
+                    clear_abi_parse_views(tree);
+                    flag_tree_error(tree, MPACK_ERROR_BUG);
+                }
             }
             Err(err) => {
                 flag_tree_error(tree, err);
@@ -789,17 +816,23 @@ pub unsafe extern "C" fn mpack_tree_init_stdfile(
         init_tree_clear(tree);
         match load_file_data(stdfile, max_bytes) {
             Ok(data) => {
-                let data_ptr = data.as_ptr().cast::<c_char>();
-                let data_len = data.len();
-                with_state(tree, (), |s| {
+                let stored = with_state(tree, false, |s| {
                     s.owned_data = data;
                     if close_when_done {
                         s.close_file = Some(stdfile);
                     }
+                    let t = unsafe { &mut *tree };
+                    t.data = s.owned_data.as_ptr().cast();
+                    t.data_length = s.owned_data.len();
+                    true
                 });
-                let t = unsafe { &mut *tree };
-                t.data = data_ptr;
-                t.data_length = data_len;
+                if !stored {
+                    clear_abi_parse_views(tree);
+                    if close_when_done {
+                        unsafe { fclose(stdfile) };
+                    }
+                    flag_tree_error(tree, MPACK_ERROR_BUG);
+                }
             }
             Err(err) => {
                 if close_when_done {
@@ -969,6 +1002,7 @@ pub unsafe extern "C" fn mpack_tree_try_parse(tree: *mut MpackTree) -> bool {
                     return false;
                 }
                 // Incomplete: reset error so caller can retry
+                clear_abi_parse_views(tree);
                 unsafe { (*tree).error = prev_error };
                 return false;
             }
@@ -1040,18 +1074,19 @@ pub unsafe extern "C" fn mpack_tree_destroy(tree: *mut MpackTree) -> MpackError 
         return MPACK_ERROR_BUG;
     }
     match catch_ffi_panic(|| {
-        // Call user teardown first
-        let teardown = unsafe { (*tree).teardown.take() };
-        if let Some(td) = teardown {
-            unsafe { td(tree) };
-        }
-
-        // Remove side state (drops heap_nodes, owned_data, etc.)
+        // Revoke ABI views before the side-table drops their heap owners.
+        clear_abi_parse_views(tree);
         let state = remove_state(tree);
         if let Some(s) = state {
             if let Some(file) = s.close_file {
                 unsafe { fclose(file) };
             }
+        }
+
+        // C cleans parser pages/buffers before calling teardown.
+        let teardown = unsafe { (*tree).teardown.take() };
+        if let Some(td) = teardown {
+            unsafe { td(tree) };
         }
 
         tree_error(tree)
@@ -1706,19 +1741,19 @@ pub unsafe extern "C" fn mpack_node_strlen(node: MpackNode) -> usize {
 
 /// Returns byte size of a bin node.
 #[no_mangle]
-pub unsafe extern "C" fn mpack_node_bin_size(node: MpackNode) -> u32 {
+pub unsafe extern "C" fn mpack_node_bin_size(node: MpackNode) -> usize {
     if node.tree.is_null() {
         return 0;
     }
     match catch_ffi_panic(|| {
         if node_tree_error(node) != MPACK_OK {
-            return 0u32;
+            return 0usize;
         }
         if nd_type(node) != TYPE_BIN {
             flag_tree_error(node.tree, MPACK_ERROR_TYPE);
             return 0;
         }
-        nd_len(node)
+        nd_len(node) as usize
     }) {
         Ok(v) => v,
         Err(_) => {
@@ -2924,10 +2959,20 @@ pub unsafe extern "C" fn mpack_node_flag_error(node: MpackNode, error: MpackErro
     flag_tree_error(node.tree, error);
 }
 
-/// Returns a missing-type node for the same tree as `node`.
+/// Expects a missing node; flags type error otherwise.
 #[no_mangle]
-pub unsafe extern "C" fn mpack_node_missing(node: MpackNode) -> MpackNode {
-    missing_node_for(node.tree)
+pub unsafe extern "C" fn mpack_node_missing(node: MpackNode) {
+    if node.tree.is_null() {
+        return;
+    }
+    let _ = catch_ffi_panic(|| {
+        if node_tree_error(node) != MPACK_OK {
+            return;
+        }
+        if nd_type(node) != TYPE_MISSING {
+            flag_tree_error(node.tree, MPACK_ERROR_TYPE);
+        }
+    });
 }
 
 // ── print functions ───────────────────────────────────────────────────────────

@@ -94,5 +94,10 @@ name = "node_ffi_stream"
 path = "tests/port/node_ffi_stream.rs"
 required-features = ["full-suite-abi"]
 
+[[test]]
+name = "node_ffi_lifecycle"
+path = "tests/port/node_ffi_lifecycle.rs"
+required-features = ["full-suite-abi"]
+
 [build-dependencies]
 cc = { version = "1.4.0", optional = true }
