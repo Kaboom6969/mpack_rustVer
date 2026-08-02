@@ -68,6 +68,7 @@ unsafe extern "C" {
 
 /// Per-tree Rust state, keyed by `tree as usize` in the global map.
 struct FfiTreeState {
+    /// Retained only transiently during parse; cleared after ABI materialize.
     nodes: Vec<NodeData>,
     root: Option<usize>,
     size: usize,
@@ -483,7 +484,8 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
             unsafe { (*tree).root = pool }; // root is at index 0 after BFS
         }
         with_state(tree, (), |s| {
-            s.nodes = nodes;
+            // Accessors use ABI heap/pool only; drop the safe-core graph to cut RSS.
+            s.nodes = Vec::new();
             s.root = root;
             s.size = size;
             s.parsed = true;
@@ -503,7 +505,8 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
         // disappears or its mutex is poisoned, `heap` drops locally while the
         // tree stays on its nil sentinel and fails closed below.
         let published = with_state(tree, false, |s| {
-            s.nodes = nodes;
+            // Accessors use ABI heap/pool only; drop the safe-core graph to cut RSS.
+            s.nodes = Vec::new();
             s.root = root;
             s.size = size;
             s.parsed = true;

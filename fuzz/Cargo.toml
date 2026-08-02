@@ -30,3 +30,10 @@ path = "fuzz_targets/node_diff.rs"
 doc = false
 test = false
 bench = false
+
+[[bin]]
+name = "total_diff"
+path = "fuzz_targets/total_diff.rs"
+doc = false
+test = false
+bench = false

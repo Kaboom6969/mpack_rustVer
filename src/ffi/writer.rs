@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::ffi::CStr;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::common::Error;
@@ -65,6 +66,13 @@ struct FfiBuildFrame {
 fn ffi_builders() -> &'static Mutex<HashMap<usize, Vec<FfiBuildFrame>>> {
     static BUILDERS: OnceLock<Mutex<HashMap<usize, Vec<FfiBuildFrame>>>> = OnceLock::new();
     BUILDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Writers that currently have a non-empty builder stack.
+/// When zero, `builder_record_value` skips the side-table Mutex (common encode path).
+fn open_builder_writers() -> &'static AtomicUsize {
+    static OPEN: AtomicUsize = AtomicUsize::new(0);
+    &OPEN
 }
 
 /// Initializes a fixed-buffer MPack writer.
@@ -1183,11 +1191,18 @@ fn flag_error_impl(writer: *mut MpackWriter, error: MpackError) {
 
 fn clear_builder_state(writer: *mut MpackWriter) {
     if let Ok(mut builders) = ffi_builders().lock() {
-        builders.remove(&(writer as usize));
+        if let Some(frames) = builders.remove(&(writer as usize)) {
+            if !frames.is_empty() {
+                open_builder_writers().fetch_sub(1, Ordering::Release);
+            }
+        }
     }
 }
 
 fn builder_is_open(writer: *mut MpackWriter) -> bool {
+    if open_builder_writers().load(Ordering::Acquire) == 0 {
+        return false;
+    }
     ffi_builders()
         .lock()
         .map(|builders| builders.get(&(writer as usize)).is_some_and(|frames| !frames.is_empty()))
@@ -1195,6 +1210,10 @@ fn builder_is_open(writer: *mut MpackWriter) -> bool {
 }
 
 fn builder_record_value(writer: *mut MpackWriter) {
+    // Hot path: no writer has an open builder → skip the global side-table lock.
+    if open_builder_writers().load(Ordering::Acquire) == 0 {
+        return;
+    }
     let Ok(mut builders) = ffi_builders().lock() else {
         flag_error_impl(writer, MPACK_ERROR_BUG);
         return;
@@ -1217,6 +1236,9 @@ fn builder_record_value(writer: *mut MpackWriter) {
 
 fn builder_start_known(writer: *mut MpackWriter, elements: usize) {
     if elements == 0 {
+        return;
+    }
+    if open_builder_writers().load(Ordering::Acquire) == 0 {
         return;
     }
     let Ok(mut builders) = ffi_builders().lock() else {
@@ -1281,15 +1303,18 @@ fn builder_start(writer: *mut MpackWriter, kind: BuildKind) {
         flag_error_impl(writer, MPACK_ERROR_BUG);
         return;
     };
-    builders
-        .entry(writer as usize)
-        .or_default()
-        .push(FfiBuildFrame {
-            kind,
-            start,
-            elements: 0,
-            known_compounds: Vec::new(),
-        });
+    let key = writer as usize;
+    let frames = builders.entry(key).or_default();
+    let first_frame = frames.is_empty();
+    frames.push(FfiBuildFrame {
+        kind,
+        start,
+        elements: 0,
+        known_compounds: Vec::new(),
+    });
+    if first_frame {
+        open_builder_writers().fetch_add(1, Ordering::Release);
+    }
 }
 
 fn builder_complete(writer: *mut MpackWriter, kind: BuildKind) {
@@ -1323,6 +1348,7 @@ fn builder_complete(writer: *mut MpackWriter, kind: BuildKind) {
         };
         if frames.is_empty() {
             builders.remove(&(writer as usize));
+            open_builder_writers().fetch_sub(1, Ordering::Release);
         }
         frame
     };

@@ -248,10 +248,15 @@ fn parse_push_node(
         _ => {}
     }
     let index = nodes.len();
+    let children = match tag {
+        Tag::Array(count) => Vec::with_capacity(count as usize),
+        Tag::Map(count) => Vec::with_capacity((count as usize).saturating_mul(2)),
+        _ => Vec::new(),
+    };
     nodes.push(NodeData {
         tag,
         payload_off,
-        children: Vec::new(),
+        children,
     });
     Some(index)
 }

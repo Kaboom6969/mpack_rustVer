@@ -12,6 +12,7 @@ In-process libFuzzer targets compare digests from **original C MPack**
 | --- | --- |
 | `reader_diff` | One top-level value: iterative `read_tag` + raw str/bin/ext payloads |
 | `node_diff` | `Tree::parse` / `mpack_tree_parse` + preorder tag digest |
+| `total_diff` | Same input: both reader and node digests must match C vs Rust |
 
 Depth is capped at 1024 (aligned with upstream `test/fuzz/fuzz.c`). Digests
 record sticky error, tag records (type / aux / scalar / payload FNV-1a), and
@@ -44,9 +45,14 @@ cargo +nightly fuzz run reader_diff --fuzz-dir fuzz
 # from repo root (Linux or WSL)
 cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
 cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_len=65536
+cargo +nightly fuzz run total_diff --fuzz-dir fuzz -- -max_len=65536
 
 # timed smoke (example); raise -max_len so inputs can reach ORACLE_MAX_INPUT
 cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- \
+  -max_total_time=60 -max_len=65536
+cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- \
+  -max_total_time=60 -max_len=65536
+cargo +nightly fuzz run total_diff --fuzz-dir fuzz -- \
   -max_total_time=60 -max_len=65536
 ```
 
@@ -54,9 +60,10 @@ libFuzzer’s default `-max_len` is **4096**, while the oracle caps at
 `ORACLE_MAX_INPUT` / `MAX_INPUT_LEN` (**65536**). Pass `-max_len=65536` when
 you want coverage of the large-input truncation path.
 
-Seeds live under `corpus/reader_diff/` and `corpus/node_diff/`. Artifacts and
-`fuzz/target/` are gitignored. Hex-named libFuzzer units under `corpus/` are
-also gitignored; hand-named seeds stay tracked.
+Seeds live under `corpus/reader_diff/`, `corpus/node_diff/`, and
+`corpus/total_diff/`. Artifacts and `fuzz/target/` are gitignored. Hex-named
+libFuzzer units under `corpus/` are also gitignored; hand-named seeds stay
+tracked.
 
 ## Layout
 
@@ -66,7 +73,7 @@ fuzz/
   build.rs            # compiles original C + oracle_*.c
   c/                  # mpack-config.h + oracle helpers
   src/                # Rust digest mirror + oracle FFI
-  fuzz_targets/       # reader_diff, node_diff
+  fuzz_targets/       # reader_diff, node_diff, total_diff
   corpus/             # seed inputs
 ```
 
