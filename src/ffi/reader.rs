@@ -1818,7 +1818,6 @@ fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
                         stack.pop();
                         write_print_indent(output, d);
                         let _ = write!(output, "]");
-                        current_depth = d;
                         continue;
                     }
                     write_print_indent(output, *depth + 1);
@@ -1843,7 +1842,6 @@ fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
                             stack.pop();
                             write_print_indent(output, d);
                             let _ = write!(output, "}}");
-                            current_depth = d;
                             continue;
                         }
                         *phase = MapPhase::Key;
