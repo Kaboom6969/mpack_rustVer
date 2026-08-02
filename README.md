@@ -92,8 +92,16 @@ linker pitfalls, and corpus layout.
 
 ## Status
 
-The first safe-core-to-C-ABI vertical slice is complete for fixed-buffer nil
-encoding under `embed-writer`. Other writer operations, callbacks, allocation,
-reader/expect/node, and full frozen-suite parity remain to be implemented. See
-[`DECISIONS.md`](DECISIONS.md) for the exact ABI boundary and documented
-divergences.
+Safe core + C ABI FFI for writer / reader / expect / node are in place.
+Frozen parity gates (`tests/port/frozen-link/`: `--embed-writer` and
+`--everything`) are the acceptance proof; see [`DECISIONS.md`](DECISIONS.md).
+
+Fair C-vs-Rust FFI benchmarks (identical C driver, everything features,
+forced tracking, release opts):
+
+```bash
+python3 bench/run.py
+```
+
+Methodology and measured results: [`bench/methodology.md`](bench/methodology.md),
+[`bench/results.json`](bench/results.json).
