@@ -149,6 +149,12 @@ This slice targets `test-reader.c` green under
   Observable results for well-formed / truncated inputs match C; only the
   failure mode for extreme depth differs (completes or sticky decode error
   instead of stack overflow).
+- FFI `mpack_print_data_to_*` uses the same **iterative** frame-stack approach
+  for compound pretty-print (C remains recursive). Pseudo-JSON output for
+  normal inputs is unchanged; extreme nesting completes without stack overflow.
+- `mpack_reader_set_skip` with `size == 0` (e.g. after `init_data`) flags sticky
+  `mpack_error_bug` and does not install the callback. C uses `mpack_assert`
+  (fatal in debug); this port fail-closes like `set_fill`.
 
 Frozen-link scaffolding: `tests/port/frozen-link/run.py` creates a repo-root
 `test` symlink to `tests/original/test` before running the everything suite so

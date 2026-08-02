@@ -3,12 +3,16 @@
 use std::mem::MaybeUninit;
 
 use mpack::ffi::types::{
-    MpackReader, MPACK_ERROR_TOO_BIG, MPACK_OK,
+    MpackReader, MPACK_ERROR_BUG, MPACK_ERROR_TOO_BIG, MPACK_OK,
 };
 
 unsafe extern "C" {
     fn mpack_reader_init_data(reader: *mut MpackReader, data: *const i8, count: usize);
     fn mpack_reader_destroy(reader: *mut MpackReader) -> i32;
+    fn mpack_reader_set_skip(
+        reader: *mut MpackReader,
+        skip: Option<unsafe extern "C" fn(*mut MpackReader, usize)>,
+    );
     fn mpack_read_bytes_alloc_impl(
         reader: *mut MpackReader,
         count: usize,
@@ -16,7 +20,15 @@ unsafe extern "C" {
     ) -> *mut i8;
     fn mpack_discard(reader: *mut MpackReader);
     fn mpack_reader_flag_error(reader: *mut MpackReader, error: i32);
+    fn mpack_print_data_to_buffer(
+        data: *const i8,
+        data_size: usize,
+        buffer: *mut i8,
+        buffer_size: usize,
+    );
 }
+
+unsafe extern "C" fn unused_skip(_reader: *mut MpackReader, _count: usize) {}
 
 fn fresh_reader(data: &[u8]) -> MpackReader {
     let mut reader = MaybeUninit::<MpackReader>::uninit();
@@ -93,4 +105,55 @@ fn discard_after_flagged_error_is_noop() {
     unsafe {
         mpack_reader_destroy(&mut reader);
     }
+}
+
+#[test]
+fn set_skip_on_data_only_reader_flags_bug() {
+    // init_data leaves size == 0 (no writable buffer). C asserts; we fail closed.
+    let mut reader = fresh_reader(&[0xc0]);
+    assert_eq!(reader.size, 0);
+    unsafe {
+        mpack_reader_set_skip(&mut reader, Some(unused_skip));
+    }
+    assert_eq!(reader.error, MPACK_ERROR_BUG);
+    assert!(reader.skip.is_none());
+    let error = unsafe { mpack_reader_destroy(&mut reader) };
+    assert_eq!(error, MPACK_ERROR_BUG);
+}
+
+#[test]
+fn print_deep_nesting_completes_iteratively() {
+    // 10_000 nested fixarrays of length 1, terminated by nil — must not stack-overflow.
+    const DEPTH: usize = 10_000;
+    let mut data = vec![0x91u8; DEPTH];
+    data.push(0xc0);
+    let mut buffer = vec![0i8; 64];
+    unsafe {
+        mpack_print_data_to_buffer(
+            data.as_ptr().cast(),
+            data.len(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        );
+    }
+    // Truncated into a small buffer, but must still terminate and not crash.
+    assert_eq!(buffer[buffer.len() - 1], 0);
+    assert_ne!(buffer[0], 0);
+}
+
+#[test]
+fn print_shallow_array_matches_expected_shape() {
+    // [nil, true] => "[\n    null,\n    true\n]"
+    let data = [0x92u8, 0xc0, 0xc3];
+    let mut buffer = vec![0i8; 64];
+    unsafe {
+        mpack_print_data_to_buffer(
+            data.as_ptr().cast(),
+            data.len(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        );
+    }
+    let printed = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    assert_eq!(printed.to_str().unwrap(), "[\n    null,\n    true\n]");
 }

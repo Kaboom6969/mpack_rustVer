@@ -153,6 +153,16 @@ unsafe fn borrow_reader<'a>(reader: *mut MpackReader) -> &'a mut MpackReader {
     unsafe { &mut *reader }
 }
 
+/// Sticky error field after the ABI entry has null-checked `reader`.
+///
+/// # Safety
+///
+/// Same contract as [`borrow_reader`].
+unsafe fn reader_error(reader: *mut MpackReader) -> MpackError {
+    // SAFETY: Caller upholds the null/liveness contract.
+    unsafe { borrow_reader(reader).error }
+}
+
 fn remaining_of(state: &MpackReader) -> Option<usize> {
     if state.data.is_null() && state.end.is_null() {
         return Some(0);
@@ -543,7 +553,8 @@ fn init_stdfile_impl(reader: *mut MpackReader, file: *mut c_void, close_when_don
 }
 
 unsafe extern "C" fn file_reader_fill(reader: *mut MpackReader, buffer: *mut c_char, count: usize) -> usize {
-    let state = unsafe { &*reader };
+    // SAFETY: Fill callback is only installed on a live non-null reader.
+    let state = unsafe { borrow_reader(reader) };
     let context = unsafe { &*state.context.cast::<FileContext>() };
     if unsafe { feof(context.file) } != 0 {
         flag_error_impl(reader, MPACK_ERROR_EOF);
@@ -553,10 +564,11 @@ unsafe extern "C" fn file_reader_fill(reader: *mut MpackReader, buffer: *mut c_c
 }
 
 unsafe extern "C" fn file_reader_skip(reader: *mut MpackReader, count: usize) {
-    if unsafe { (*reader).error } != MPACK_OK {
+    // SAFETY: Skip callback is only installed on a live non-null reader.
+    if unsafe { reader_error(reader) } != MPACK_OK {
         return;
     }
-    let state = unsafe { &*reader };
+    let state = unsafe { borrow_reader(reader) };
     let context = unsafe { &*state.context.cast::<FileContext>() };
     if unsafe { ftell(context.file) } >= 0 {
         if unsafe { fseek(context.file, count as i64, SEEK_CUR) } == 0 {
@@ -571,7 +583,8 @@ unsafe extern "C" fn file_reader_skip(reader: *mut MpackReader, count: usize) {
 }
 
 unsafe extern "C" fn file_reader_teardown(reader: *mut MpackReader) {
-    let state = unsafe { &mut *reader };
+    // SAFETY: Teardown is only invoked on a live non-null reader.
+    let state = unsafe { borrow_reader(reader) };
     if !state.buffer.is_null() {
         unsafe { free(state.buffer.cast()) };
     }
@@ -589,7 +602,8 @@ unsafe extern "C" fn file_reader_teardown(reader: *mut MpackReader) {
 }
 
 unsafe extern "C" fn file_reader_teardown_close(reader: *mut MpackReader) {
-    let state = unsafe { &*reader };
+    // SAFETY: Teardown is only invoked on a live non-null reader.
+    let state = unsafe { borrow_reader(reader) };
     let context = unsafe { &*state.context.cast::<FileContext>() };
     let file = context.file;
     let close_result = unsafe { fclose(file) };
@@ -767,7 +781,8 @@ pub unsafe extern "C" fn mpack_reader_destroy(reader: *mut MpackReader) -> Mpack
         return MPACK_ERROR_BUG;
     }
     match catch_ffi_panic(|| {
-        let state = unsafe { &mut *reader };
+        // SAFETY: Non-null reader points at writable C storage.
+        let state = unsafe { borrow_reader(reader) };
         if let Some(teardown) = state.teardown.take() {
             unsafe { teardown(reader) };
         }
@@ -789,7 +804,8 @@ pub unsafe extern "C" fn mpack_reader_set_fill(reader: *mut MpackReader, fill: M
         return;
     }
     if catch_ffi_panic(|| {
-        let state = unsafe { &mut *reader };
+        // SAFETY: Non-null reader points at writable C storage.
+        let state = unsafe { borrow_reader(reader) };
         if state.size == 0 {
             flag_error_impl(reader, MPACK_ERROR_BUG);
             return;
@@ -810,14 +826,20 @@ pub unsafe extern "C" fn mpack_reader_set_fill(reader: *mut MpackReader, fill: M
 ///
 /// # Safety
 ///
-/// `reader` must be null or a live reader.
+/// `reader` must be null or a live reader. Requires a writable buffer
+/// (`size != 0`); otherwise flags sticky `mpack_error_bug` (fail-closed vs C assert).
 #[no_mangle]
 pub unsafe extern "C" fn mpack_reader_set_skip(reader: *mut MpackReader, skip: MpackReaderSkip) {
     if reader.is_null() {
         return;
     }
     if catch_ffi_panic(|| {
-        let state = unsafe { &mut *reader };
+        // SAFETY: Non-null reader points at writable C storage.
+        let state = unsafe { borrow_reader(reader) };
+        if state.size == 0 {
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return;
+        }
         state.skip = skip;
     })
     .is_err()
@@ -855,7 +877,8 @@ pub unsafe extern "C" fn mpack_reader_remaining(
         return 0;
     }
     match catch_ffi_panic(|| {
-        let state = unsafe { &*reader };
+        // SAFETY: Non-null reader points at writable C storage.
+        let state = unsafe { borrow_reader(reader) };
         if state.error != MPACK_OK {
             if !data.is_null() {
                 unsafe { *data = ptr::null() };
@@ -1030,7 +1053,8 @@ pub unsafe extern "C" fn mpack_read_utf8(reader: *mut MpackReader, p: *mut c_cha
             return;
         }
         read_native(reader, p, byte_count);
-        if unsafe { (*reader).error } != MPACK_OK {
+        // SAFETY: Non-null reader; read_native does not invalidate storage.
+        if unsafe { reader_error(reader) } != MPACK_OK {
             return;
         }
         let bytes = unsafe { slice::from_raw_parts(p.cast::<u8>(), byte_count) };
@@ -1054,7 +1078,8 @@ fn read_cstr_unchecked(
         flag_error_impl(reader, MPACK_ERROR_BUG);
         return;
     }
-    if unsafe { (*reader).error } != MPACK_OK {
+    // SAFETY: Callers null-check `reader` before invoking this helper.
+    if unsafe { reader_error(reader) } != MPACK_OK {
         unsafe { *buf = 0 };
         return;
     }
@@ -1086,7 +1111,8 @@ pub unsafe extern "C" fn mpack_read_cstr(
     }
     if catch_ffi_panic(|| {
         read_cstr_unchecked(reader, buf, buffer_size, byte_count);
-        if unsafe { (*reader).error } != MPACK_OK {
+        // SAFETY: Non-null reader; cstr helper does not invalidate storage.
+        if unsafe { reader_error(reader) } != MPACK_OK {
             return;
         }
         let bytes = unsafe { slice::from_raw_parts(buf.cast::<u8>(), byte_count) };
@@ -1118,7 +1144,8 @@ pub unsafe extern "C" fn mpack_read_utf8_cstr(
     }
     if catch_ffi_panic(|| {
         read_cstr_unchecked(reader, buf, buffer_size, byte_count);
-        if unsafe { (*reader).error } != MPACK_OK {
+        // SAFETY: Non-null reader; cstr helper does not invalidate storage.
+        if unsafe { reader_error(reader) } != MPACK_OK {
             return;
         }
         let bytes = unsafe { slice::from_raw_parts(buf.cast::<u8>(), byte_count) };
@@ -1149,7 +1176,8 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
         return ptr::null_mut();
     }
     match catch_ffi_panic(|| {
-        if unsafe { (*reader).error } != MPACK_OK {
+        // SAFETY: Non-null reader points at writable C storage.
+        if unsafe { reader_error(reader) } != MPACK_OK {
             return ptr::null_mut();
         }
         if count == 0 && !null_terminated {
@@ -1167,10 +1195,10 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
             return ptr::null_mut();
         }
         // Disable error callback while holding the allocation (C parity).
-        let state = unsafe { &mut *reader };
+        let state = unsafe { borrow_reader(reader) };
         let error_fn = state.error_fn.take();
         read_native(reader, pointer, count);
-        let state = unsafe { &mut *reader };
+        let state = unsafe { borrow_reader(reader) };
         state.error_fn = error_fn;
         if state.error != MPACK_OK {
             if let Some(error_fn) = state.error_fn {
@@ -1319,7 +1347,8 @@ pub unsafe extern "C" fn mpack_read_timestamp(
         let mut buf = [0u8; 12];
         read_native(reader, buf.as_mut_ptr().cast(), size);
         unsafe { mpack_done_type(reader, TYPE_EXT) };
-        if unsafe { (*reader).error } != MPACK_OK {
+        // SAFETY: Non-null reader; prior helpers do not invalidate storage.
+        if unsafe { reader_error(reader) } != MPACK_OK {
             return zero;
         }
         match decode_timestamp_payload(&buf[..size]) {
@@ -1644,10 +1673,13 @@ fn error_name(error: crate::common::Error) -> &'static str {
     }
 }
 
-fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
-    let Some(tag) = core.read_tag() else {
-        return;
-    };
+fn write_print_indent(output: &mut Vec<u8>, depth: usize) {
+    for _ in 0..depth {
+        let _ = write!(output, "    ");
+    }
+}
+
+fn print_leaf(core: &mut Reader<'_>, output: &mut Vec<u8>, tag: Tag) {
     match tag {
         Tag::Str(length) => {
             let _ = write!(output, "\"");
@@ -1668,51 +1700,6 @@ fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
                 }
             }
             let _ = write!(output, "\"");
-        }
-        Tag::Array(count) => {
-            let _ = write!(output, "[\n");
-            for i in 0..count {
-                for _ in 0..(depth + 1) {
-                    let _ = write!(output, "    ");
-                }
-                print_element(core, output, depth + 1);
-                if core.error() != crate::common::Error::Ok {
-                    return;
-                }
-                if i + 1 != count {
-                    let _ = write!(output, ",");
-                }
-                let _ = write!(output, "\n");
-            }
-            for _ in 0..depth {
-                let _ = write!(output, "    ");
-            }
-            let _ = write!(output, "]");
-        }
-        Tag::Map(count) => {
-            let _ = write!(output, "{{\n");
-            for i in 0..count {
-                for _ in 0..(depth + 1) {
-                    let _ = write!(output, "    ");
-                }
-                print_element(core, output, depth + 1);
-                if core.error() != crate::common::Error::Ok {
-                    return;
-                }
-                let _ = write!(output, ": ");
-                print_element(core, output, depth + 1);
-                if core.error() != crate::common::Error::Ok {
-                    return;
-                }
-                if i + 1 != count {
-                    let _ = write!(output, ",");
-                }
-                let _ = write!(output, "\n");
-            }
-            for _ in 0..depth {
-                let _ = write!(output, "    ");
-            }
-            let _ = write!(output, "}}");
         }
         Tag::Bin(length) => {
             let prefix = read_print_prefix(core, length as usize);
@@ -1746,6 +1733,126 @@ fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
         }
         Tag::Double(value) => {
             let _ = write!(output, "{value:.6}");
+        }
+        Tag::Array(_) | Tag::Map(_) => unreachable!("compounds handled by iterative print"),
+    }
+}
+
+/// Pretty-print one MessagePack value. Iterative (heap frame stack) so hostile
+/// deep nesting cannot blow the Rust stack; output matches the prior recursive form.
+fn print_element(core: &mut Reader<'_>, output: &mut Vec<u8>, depth: usize) {
+    enum MapPhase {
+        Key,
+        Value,
+    }
+    enum Frame {
+        Array { left: u32, depth: usize },
+        Map {
+            left: u32,
+            depth: usize,
+            phase: MapPhase,
+        },
+    }
+
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut current_depth = depth;
+
+    loop {
+        let Some(tag) = core.read_tag() else {
+            return;
+        };
+
+        match tag {
+            Tag::Array(count) => {
+                let _ = write!(output, "[\n");
+                if count == 0 {
+                    write_print_indent(output, current_depth);
+                    let _ = write!(output, "]");
+                } else {
+                    write_print_indent(output, current_depth + 1);
+                    stack.push(Frame::Array {
+                        left: count,
+                        depth: current_depth,
+                    });
+                    current_depth += 1;
+                    continue;
+                }
+            }
+            Tag::Map(count) => {
+                let _ = write!(output, "{{\n");
+                if count == 0 {
+                    write_print_indent(output, current_depth);
+                    let _ = write!(output, "}}");
+                } else {
+                    write_print_indent(output, current_depth + 1);
+                    stack.push(Frame::Map {
+                        left: count,
+                        depth: current_depth,
+                        phase: MapPhase::Key,
+                    });
+                    current_depth += 1;
+                    continue;
+                }
+            }
+            leaf => print_leaf(core, output, leaf),
+        }
+
+        if core.error() != crate::common::Error::Ok {
+            return;
+        }
+
+        // Advance / close parent frames until another sibling is needed.
+        loop {
+            let Some(frame) = stack.last_mut() else {
+                return;
+            };
+            match frame {
+                Frame::Array { left, depth } => {
+                    *left -= 1;
+                    if *left > 0 {
+                        let _ = write!(output, ",");
+                    }
+                    let _ = write!(output, "\n");
+                    if *left == 0 {
+                        let d = *depth;
+                        stack.pop();
+                        write_print_indent(output, d);
+                        let _ = write!(output, "]");
+                        current_depth = d;
+                        continue;
+                    }
+                    write_print_indent(output, *depth + 1);
+                    current_depth = *depth + 1;
+                    break;
+                }
+                Frame::Map { left, depth, phase } => match phase {
+                    MapPhase::Key => {
+                        let _ = write!(output, ": ");
+                        *phase = MapPhase::Value;
+                        current_depth = *depth + 1;
+                        break;
+                    }
+                    MapPhase::Value => {
+                        *left -= 1;
+                        if *left > 0 {
+                            let _ = write!(output, ",");
+                        }
+                        let _ = write!(output, "\n");
+                        if *left == 0 {
+                            let d = *depth;
+                            stack.pop();
+                            write_print_indent(output, d);
+                            let _ = write!(output, "}}");
+                            current_depth = d;
+                            continue;
+                        }
+                        *phase = MapPhase::Key;
+                        write_print_indent(output, *depth + 1);
+                        current_depth = *depth + 1;
+                        break;
+                    }
+                },
+            }
         }
     }
 }
