@@ -174,6 +174,7 @@ fn parse_tree(
         if !reserve_children(reader, remaining) {
             return None;
         }
+        nodes[root].children.reserve(remaining as usize);
         if remaining > 0 {
             stack.push(ParseFrame {
                 node_index: root,
@@ -198,6 +199,8 @@ fn parse_tree(
             if !reserve_children(reader, remaining) {
                 return None;
             }
+            // Reserve only after byte-budget checks so hostile counts cannot OOM.
+            nodes[child].children.reserve(remaining as usize);
             if remaining > 0 {
                 stack.push(ParseFrame {
                     node_index: child,

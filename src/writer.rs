@@ -297,8 +297,17 @@ impl<'buffer> Writer<'buffer> {
 
     /// Writes raw payload bytes, stopping at the first byte that does not fit.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.write_byte(byte);
+        if self.error != Error::Ok || bytes.is_empty() {
+            return;
+        }
+        let available = self.buffer.len().saturating_sub(self.position);
+        let n = bytes.len().min(available);
+        if n > 0 {
+            self.buffer[self.position..self.position + n].copy_from_slice(&bytes[..n]);
+            self.position += n;
+        }
+        if n < bytes.len() {
+            self.error = Error::TooBig;
         }
     }
 
@@ -318,9 +327,8 @@ impl<'buffer> Writer<'buffer> {
             self.error = Error::TooBig;
             return;
         }
-        for &byte in header {
-            self.write_byte(byte);
-        }
+        self.buffer[self.position..self.position + header.len()].copy_from_slice(header);
+        self.position += header.len();
     }
 
     fn flag_too_big(&mut self) {
