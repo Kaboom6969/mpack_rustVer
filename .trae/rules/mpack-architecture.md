@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Dual-Layer Architecture
 
-- **Safe Rust core**: idiomatic types (`Vec<u8>`, `Result`, enums for tags/errors). Prefer zero `unsafe` in encode/decode algorithms.
+- **Safe Rust core**: idiomatic types (`Vec<u8>`, `Result`, enums for tags/errors). `common` / `writer` / `reader` / `expect` / `node` are `forbid(unsafe_code)`; raw pointers live only under `src/ffi/`.
 - **FFI layer**: `#[repr(C)]` + `#[no_mangle] pub extern "C"` matching MPack C ABI (`mpack_reader_t`, `mpack_writer_t`, `mpack_tree_t`, `mpack_node_t`, `mpack_tag_t`, `mpack_error_t`, …) so the original suite links unchanged.
 - **Public C headers**: keep under `include/` as the ABI contract; thin C adapters (if needed) live outside `tests/original/`.
 

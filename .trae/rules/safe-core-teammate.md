@@ -1,18 +1,26 @@
+---
+description: Safe-core teammate constraints (always on); lead/FFI work is explicitly exempt
+alwaysApply: true
+---
+
 # Safe-core teammate constraints
 
 Always applied. **Lead / FFI owner is exempt** when doing API-contract updates (document in `DECISIONS.md`) or any work under `src/ffi/**` / frozen-link wiring.
 
-When the task is **Reader/Expect safe-core implementation** (teammate lane), follow the constraints below strictly.
+When the task is **Reader / Expect / Node safe-core implementation** (teammate lane), follow the constraints below strictly.
 
 ## Allowed paths (teammate lane)
 
-- May edit: `src/reader.rs`, `src/expect.rs`, and tests under `tests/port/` only.
+- May edit **only your assigned module**: `src/reader.rs`, `src/expect.rs`, or
+  `src/node.rs`, plus tests under `tests/port/` for that module.
 - May read `original_c/` for behavior; do not copy pointer-style APIs into safe core.
 - **Do not edit:** `src/ffi/**`, `tests/original/**`, frozen-link C adapters.
+- Do not edit another teammate's module (e.g. Node lane must not touch `expect.rs`).
 
 ## Zero unsafe (hard)
 
-- `reader` and `expect` are `forbid(unsafe_code)`. No `unsafe`, no raw pointers in those modules.
+- `reader`, `expect`, and `node` are `forbid(unsafe_code)`. No `unsafe`, no raw
+  pointers in those modules.
 - No C callbacks, no `malloc`/`free`, no allocator-owned pointer returns from safe core.
 - Use `&[u8]`, `&mut [u8]`, `Tag`, `Error`, `Timestamp`, `Option` / `bool` only.
 
@@ -22,7 +30,9 @@ When the task is **Reader/Expect safe-core implementation** (teammate lane), fol
 - Fill or fix function bodies; add port tests only.
 - Expect stays free functions on `&mut Reader<'_>`.
 - Keep `ExpectCompound` for `*_or_nil`. Use `r#bool` / `r#str` / `true_` / `false_`.
-- Do not add `*_alloc` or FFI-shaped APIs to expect/reader.
+- Node stays the **minimal** locked surface (`Tree` / `Node`, `type_`, `&[u8]`
+  payloads). Do not add optional/contains/enum/`*_alloc` without lead approval.
+- Do not add `*_alloc` or FFI-shaped APIs to expect/reader/node.
 
 ## Out of scope for teammates
 
@@ -31,8 +41,8 @@ Streaming fill/skip, file init, `done_*` tracking, C `char*` copies, frozen-suit
 ## Done means (teammate lane)
 
 - `cargo test` (including `tests/port` cases) passes.
-- No public API drift; no `unsafe` in reader/expect.
-- Do not claim `test-reader.c` / `test-expect.c` green — that is after FFI by the lead.
+- No public API drift; no `unsafe` in reader/expect/node.
+- Do not claim `test-reader.c` / `test-expect.c` / `test-node.c` green — that is after FFI by the lead.
 
 ## Lead / FFI exemption
 
