@@ -1,9 +1,8 @@
 //! Tree / DOM parse + typed accessors (mirrors `mpack-node`).
 //!
-//! Public items here are a **frozen minimal safe-core contract** (see
-//! `DECISIONS.md`). Bodies are intentional stubs for teammate fill-in:
-//! implement parse + accessors; do **not** change public signatures without
-//! lead approval.
+//! Public items here are a **frozen minimal safe-core contract**. Do not change
+//! public signatures without lead approval; document semantic divergences from
+//! C in `DECISIONS.md` (Node table / hotspots).
 //!
 //! Out of scope for this module: stream/file init, C pools, `*_alloc`, and
 //! copying into C `char*` (FFI / lead).
@@ -27,8 +26,8 @@ pub struct Tree<'data> {
     error: Cell<Error>,
 }
 
-/// Internal node storage. Teammate owns the layout behind the frozen API;
-/// fields may be extended without changing public signatures.
+/// Internal node storage behind the frozen public API; fields may be extended
+/// without changing public signatures.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct NodeData {
@@ -48,7 +47,8 @@ pub struct Node<'tree, 'data> {
 impl<'data> Tree<'data> {
     /// Parses one MessagePack value from `data` into a node tree.
     ///
-    /// Stub: leaves `Error::Unsupported` and no root. Teammate replaces body.
+    /// Nesting uses recursive descent (see `DECISIONS.md`); trailing bytes after
+    /// the first value are allowed.
     pub fn parse(data: &'data [u8]) -> Self {
         let mut reader = Reader::new(data);
         let mut nodes = Vec::new();
@@ -130,8 +130,6 @@ fn parse_node<'data>(reader: &mut Reader<'data>, nodes: &mut Vec<NodeData>) -> O
 
 impl<'tree, 'data> Node<'tree, 'data> {
     /// Returns the node's tag (even if the tree already has an error).
-    ///
-    /// Stub: returns `Tag::Nil`. Teammate replaces body.
     pub fn tag(self) -> Tag {
         self.tree
             .nodes
@@ -149,15 +147,11 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Returns true if this node is nil.
-    ///
-    /// Stub: always `false`. Teammate replaces body.
     pub fn is_nil(self) -> bool {
         matches!(self.tag(), Tag::Nil)
     }
 
     /// Reads a bool; flags `Error::Type` on mismatch.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn as_bool(self) -> Option<bool> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -172,8 +166,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Reads an unsigned value (uint, or non-negative int); flags type errors.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn as_u64(self) -> Option<u64> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -189,8 +181,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Reads a signed value (int, or uint that fits in `i64`); flags type errors.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn as_i64(self) -> Option<i64> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -211,9 +201,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
         }
     }
 
-    /// Reads `f32` (float tag only for the minimal freeze; widen later if needed).
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
+    /// Reads `f32` (`Tag::Float` only; see `DECISIONS.md` Node table).
     pub fn as_f32(self) -> Option<f32> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -228,8 +216,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Reads `f64` from float or double tags.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn as_f64(self) -> Option<f64> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -245,8 +231,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Returns str payload bytes; flags `Error::Type` when not a str.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn str_bytes(self) -> Option<&'data [u8]> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -268,8 +252,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Returns bin payload bytes; flags `Error::Type` when not a bin.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn bin_bytes(self) -> Option<&'data [u8]> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -291,8 +273,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Returns `(ext_type, payload)`; flags `Error::Type` when not an ext.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn ext(self) -> Option<(i8, &'data [u8])> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -316,8 +296,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Array element count; flags type error when not an array.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn array_len(self) -> Option<usize> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -333,8 +311,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Array element at `index`; flags type/data errors like C bounds checks.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn array_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -354,8 +330,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Map entry count; flags type error when not a map.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn map_count(self) -> Option<usize> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -368,8 +342,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Map key at entry `index`.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn map_key_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -390,8 +362,6 @@ impl<'tree, 'data> Node<'tree, 'data> {
     }
 
     /// Map value at entry `index`.
-    ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
     pub fn map_value_at(self, _index: usize) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -413,8 +383,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
 
     /// Finds a map value whose key is unsigned/int equal to `key`.
     ///
-    /// Missing key should flag `Error::Data` (required lookup) once implemented.
-    /// Stub: flags `Error::Unsupported` and returns `None`.
+    /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
     pub fn map_uint(self, _key: u64) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
@@ -451,7 +420,7 @@ impl<'tree, 'data> Node<'tree, 'data> {
 
     /// Finds a map value whose key is a str with exact byte contents `key`.
     ///
-    /// Stub: flags `Error::Unsupported` and returns `None`.
+    /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
     pub fn map_str(self, _key: &[u8]) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
