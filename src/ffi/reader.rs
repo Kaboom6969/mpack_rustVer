@@ -37,6 +37,10 @@ const TYPE_EXT: c_int = 11;
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(pointer: *mut c_void);
+    /// Frozen-suite allocator (`MPACK_MALLOC` → `test_malloc`).
+    fn test_malloc(size: usize) -> *mut c_void;
+    /// Frozen-suite free (`MPACK_FREE` → `test_free`).
+    fn test_free(pointer: *mut c_void);
     fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
     fn fread(data: *mut c_void, size: usize, count: usize, file: *mut c_void) -> usize;
     fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
@@ -69,7 +73,7 @@ fn empty_reader() -> MpackReader {
     }
 }
 
-fn tag_to_abi(tag: Tag) -> MpackTag {
+pub(crate) fn tag_to_abi(tag: Tag) -> MpackTag {
     match tag {
         Tag::Nil => MpackTag::nil(),
         Tag::Bool(value) => MpackTag {
@@ -148,7 +152,7 @@ fn tag_length(tag: &MpackTag) -> u32 {
 ///
 /// `reader` must be non-null and point to uniquely writable `mpack_reader_t`
 /// storage for the duration of the returned borrow.
-unsafe fn borrow_reader<'a>(reader: *mut MpackReader) -> &'a mut MpackReader {
+pub(crate) unsafe fn borrow_reader<'a>(reader: *mut MpackReader) -> &'a mut MpackReader {
     // SAFETY: Caller upholds the null/liveness contract above.
     unsafe { &mut *reader }
 }
@@ -158,12 +162,12 @@ unsafe fn borrow_reader<'a>(reader: *mut MpackReader) -> &'a mut MpackReader {
 /// # Safety
 ///
 /// Same contract as [`borrow_reader`].
-unsafe fn reader_error(reader: *mut MpackReader) -> MpackError {
+pub(crate) unsafe fn reader_error(reader: *mut MpackReader) -> MpackError {
     // SAFETY: Caller upholds the null/liveness contract.
     unsafe { borrow_reader(reader).error }
 }
 
-fn remaining_of(state: &MpackReader) -> Option<usize> {
+pub(crate) fn remaining_of(state: &MpackReader) -> Option<usize> {
     if state.data.is_null() && state.end.is_null() {
         return Some(0);
     }
@@ -178,7 +182,7 @@ fn remaining_of(state: &MpackReader) -> Option<usize> {
     Some(end - data)
 }
 
-fn data_slice(state: &MpackReader) -> Option<&[u8]> {
+pub(crate) fn data_slice(state: &MpackReader) -> Option<&[u8]> {
     let remaining = remaining_of(state)?;
     if remaining == 0 {
         return Some(&[]);
@@ -187,11 +191,11 @@ fn data_slice(state: &MpackReader) -> Option<&[u8]> {
     Some(unsafe { slice::from_raw_parts(state.data.cast::<u8>(), remaining) })
 }
 
-fn advance(state: &mut MpackReader, count: usize) {
+pub(crate) fn advance(state: &mut MpackReader, count: usize) {
     state.data = state.data.wrapping_add(count);
 }
 
-fn flag_error_on(state: &mut MpackReader, reader: *mut MpackReader, error: MpackError) {
+pub(crate) fn flag_error_on(state: &mut MpackReader, reader: *mut MpackReader, error: MpackError) {
     if error == MPACK_OK || state.error != MPACK_OK {
         return;
     }
@@ -204,7 +208,7 @@ fn flag_error_on(state: &mut MpackReader, reader: *mut MpackReader, error: Mpack
     }
 }
 
-fn flag_error_impl(reader: *mut MpackReader, error: MpackError) {
+pub(crate) fn flag_error_impl(reader: *mut MpackReader, error: MpackError) {
     if reader.is_null() || error == MPACK_OK {
         return;
     }
@@ -213,7 +217,7 @@ fn flag_error_impl(reader: *mut MpackReader, error: MpackError) {
     flag_error_on(state, reader, error);
 }
 
-fn flag_bug(reader: *mut MpackReader) {
+pub(crate) fn flag_bug(reader: *mut MpackReader) {
     if reader.is_null() {
         return;
     }
@@ -264,7 +268,7 @@ fn fill_range(reader: *mut MpackReader, destination: *mut c_char, min_bytes: usi
     count
 }
 
-fn ensure_impl(reader: *mut MpackReader, count: usize) -> bool {
+pub(crate) fn ensure_impl(reader: *mut MpackReader, count: usize) -> bool {
     let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
         return false;
@@ -291,7 +295,7 @@ fn header_size_for_marker(marker: u8) -> usize {
     base + usize::from(matches!(marker, 0xc7..=0xc9 | 0xd4..=0xd8))
 }
 
-fn ensure_tag_header(reader: *mut MpackReader) -> bool {
+pub(crate) fn ensure_tag_header(reader: *mut MpackReader) -> bool {
     if !ensure_impl(reader, 1) {
         return false;
     }
@@ -302,7 +306,7 @@ fn ensure_tag_header(reader: *mut MpackReader) -> bool {
     ensure_impl(reader, needed)
 }
 
-fn read_with_core<T>(
+pub(crate) fn read_with_core<T>(
     reader: *mut MpackReader,
     mut operation: impl FnMut(&mut Reader<'_>) -> T,
     on_error: impl FnOnce() -> T,
@@ -404,7 +408,7 @@ fn skip_bytes_straddle(reader: *mut MpackReader, count: usize) {
     skip_using_fill(reader, remaining);
 }
 
-fn read_native(reader: *mut MpackReader, destination: *mut c_char, count: usize) {
+pub(crate) fn read_native(reader: *mut MpackReader, destination: *mut c_char, count: usize) {
     if count == 0 {
         return;
     }
@@ -474,19 +478,41 @@ fn read_tag_impl(reader: *mut MpackReader) -> MpackTag {
     if state.error != MPACK_OK {
         return MpackTag::nil();
     }
+    let track_error = crate::ffi::stubs::track::track_element(&mut state.track);
+    if track_error != MPACK_OK {
+        flag_error_on(state, reader, track_error);
+        return MpackTag::nil();
+    }
     if !ensure_tag_header(reader) {
         return MpackTag::nil();
     }
-    read_with_core(
+    let tag = read_with_core(
         reader,
         |core| core.read_tag().map(tag_to_abi).unwrap_or_else(MpackTag::nil),
         MpackTag::nil,
-    )
+    );
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return tag;
+    }
+    let count = (tag.value & u32::MAX as u64) as u32;
+    let push_error =
+        crate::ffi::stubs::track::track_push_for_tag(&mut state.track, tag.type_, count);
+    if push_error != MPACK_OK {
+        flag_error_on(state, reader, push_error);
+        return MpackTag::nil();
+    }
+    tag
 }
 
 fn peek_tag_impl(reader: *mut MpackReader) -> MpackTag {
     let state = unsafe { borrow_reader(reader) };
     if state.error != MPACK_OK {
+        return MpackTag::nil();
+    }
+    let track_error = crate::ffi::stubs::track::track_peek_element(&state.track);
+    if track_error != MPACK_OK {
+        flag_error_on(state, reader, track_error);
         return MpackTag::nil();
     }
     if !ensure_tag_header(reader) {
@@ -518,7 +544,16 @@ fn peek_tag_impl(reader: *mut MpackReader) -> MpackTag {
     }
 }
 
-fn done_type_impl(_reader: *mut MpackReader, _type: c_int) {}
+pub(crate) fn done_type_impl(reader: *mut MpackReader, type_: c_int) {
+    let state = unsafe { borrow_reader(reader) };
+    if state.error != MPACK_OK {
+        return;
+    }
+    let error = crate::ffi::stubs::track::track_pop(&mut state.track, type_);
+    if error != MPACK_OK {
+        flag_error_on(state, reader, error);
+    }
+}
 
 fn init_stdfile_impl(reader: *mut MpackReader, file: *mut c_void, close_when_done: bool) {
     let buffer = unsafe { malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
@@ -547,6 +582,10 @@ fn init_stdfile_impl(reader: *mut MpackReader, file: *mut c_void, close_when_don
     } else {
         file_reader_teardown
     });
+    let track_error = crate::ffi::stubs::track::track_init(&mut state.track);
+    if track_error != MPACK_OK {
+        state.error = track_error;
+    }
     unsafe {
         reader.write(state);
     }
@@ -642,6 +681,10 @@ pub unsafe extern "C" fn mpack_reader_init(
         state.size = size;
         state.data = buffer;
         state.end = buffer.wrapping_add(count);
+        let track_error = crate::ffi::stubs::track::track_init(&mut state.track);
+        if track_error != MPACK_OK {
+            state.error = track_error;
+        }
         // SAFETY: Non-null writer storage for one mpack_reader_t.
         unsafe {
             reader.write(state);
@@ -697,6 +740,10 @@ pub unsafe extern "C" fn mpack_reader_init_data(
         } else {
             data.wrapping_add(count)
         };
+        let track_error = crate::ffi::stubs::track::track_init(&mut state.track);
+        if track_error != MPACK_OK {
+            state.error = track_error;
+        }
         unsafe {
             reader.write(state);
         }
@@ -783,6 +830,11 @@ pub unsafe extern "C" fn mpack_reader_destroy(reader: *mut MpackReader) -> Mpack
     match catch_ffi_panic(|| {
         // SAFETY: Non-null reader points at writable C storage.
         let state = unsafe { borrow_reader(reader) };
+        let cancel = state.error != MPACK_OK;
+        let track_error = crate::ffi::stubs::track::track_destroy(&mut state.track, cancel);
+        if track_error != MPACK_OK && state.error == MPACK_OK {
+            state.error = track_error;
+        }
         if let Some(teardown) = state.teardown.take() {
             unsafe { teardown(reader) };
         }
@@ -885,6 +937,14 @@ pub unsafe extern "C" fn mpack_reader_remaining(
             }
             return 0;
         }
+        let track_error = crate::ffi::stubs::track::track_check_empty(&state.track);
+        if track_error != MPACK_OK {
+            flag_error_on(state, reader, track_error);
+            if !data.is_null() {
+                unsafe { *data = ptr::null() };
+            }
+            return 0;
+        }
         let Some(remaining) = remaining_of(state) else {
             flag_error_impl(reader, MPACK_ERROR_BUG);
             if !data.is_null() {
@@ -958,6 +1018,14 @@ pub unsafe extern "C" fn mpack_read_bytes(reader: *mut MpackReader, p: *mut c_ch
             flag_error_impl(reader, MPACK_ERROR_BUG);
             return;
         }
+        let state = unsafe { borrow_reader(reader) };
+        if state.error == MPACK_OK {
+            let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, count);
+            if track_error != MPACK_OK {
+                flag_error_on(state, reader, track_error);
+                return;
+            }
+        }
         read_native(reader, p, count);
     })
     .is_err()
@@ -976,7 +1044,19 @@ pub unsafe extern "C" fn mpack_skip_bytes(reader: *mut MpackReader, count: usize
     if reader.is_null() {
         return;
     }
-    if catch_ffi_panic(|| skip_bytes_impl(reader, count)).is_err() {
+    if catch_ffi_panic(|| {
+        let state = unsafe { borrow_reader(reader) };
+        if state.error == MPACK_OK {
+            let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, count);
+            if track_error != MPACK_OK {
+                flag_error_on(state, reader, track_error);
+                return;
+            }
+        }
+        skip_bytes_impl(reader, count)
+    })
+    .is_err()
+    {
         flag_bug(reader);
     }
 }
@@ -995,7 +1075,17 @@ pub unsafe extern "C" fn mpack_read_bytes_inplace(
     if reader.is_null() {
         return ptr::null();
     }
-    match catch_ffi_panic(|| read_bytes_inplace_notrack(reader, count)) {
+    match catch_ffi_panic(|| {
+        let state = unsafe { borrow_reader(reader) };
+        if state.error == MPACK_OK {
+            let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, count);
+            if track_error != MPACK_OK {
+                flag_error_on(state, reader, track_error);
+                return ptr::null();
+            }
+        }
+        read_bytes_inplace_notrack(reader, count)
+    }) {
         Ok(pointer) => pointer,
         Err(_) => {
             flag_bug(reader);
@@ -1085,6 +1175,13 @@ fn read_cstr_unchecked(
     }
     if byte_count > buffer_size - 1 {
         flag_error_impl(reader, MPACK_ERROR_TOO_BIG);
+        unsafe { *buf = 0 };
+        return;
+    }
+    let state = unsafe { borrow_reader(reader) };
+    let track_error = crate::ffi::stubs::track::track_str_bytes_all(&mut state.track, byte_count);
+    if track_error != MPACK_OK {
+        flag_error_on(state, reader, track_error);
         unsafe { *buf = 0 };
         return;
     }
@@ -1189,7 +1286,15 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
             flag_error_impl(reader, MPACK_ERROR_TOO_BIG);
             return ptr::null_mut();
         };
-        let pointer = unsafe { malloc(size.max(1)).cast::<c_char>() };
+        let state = unsafe { borrow_reader(reader) };
+        let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, count);
+        if track_error != MPACK_OK {
+            flag_error_on(state, reader, track_error);
+            return ptr::null_mut();
+        }
+        // C-visible: suite frees with `MPACK_FREE`/`test_free`, so allocate
+        // with `test_malloc` (not libc) to keep `test_malloc_active` honest.
+        let pointer = unsafe { test_malloc(size.max(1)).cast::<c_char>() };
         if pointer.is_null() {
             flag_error_impl(reader, MPACK_ERROR_MEMORY);
             return ptr::null_mut();
@@ -1204,7 +1309,7 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
             if let Some(error_fn) = state.error_fn {
                 unsafe { error_fn(reader, state.error) };
             }
-            unsafe { free(pointer.cast()) };
+            unsafe { test_free(pointer.cast()) };
             return ptr::null_mut();
         }
         if null_terminated {
@@ -1220,7 +1325,7 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
     }
 }
 
-/// Tracking done hook (no-op until read-tracking is wired).
+/// Tracking done hook — pops the open track entry for `type_`.
 ///
 /// # Safety
 ///
@@ -1264,7 +1369,17 @@ fn discard_impl(reader: *mut MpackReader) {
         }
         match tag.type_ {
             TYPE_STR | TYPE_BIN | TYPE_EXT => {
-                skip_bytes_impl(reader, tag_length(&tag) as usize);
+                let length = tag_length(&tag) as usize;
+                let state = unsafe { borrow_reader(reader) };
+                let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, length);
+                if track_error != MPACK_OK {
+                    flag_error_on(state, reader, track_error);
+                    return;
+                }
+                skip_bytes_impl(reader, length);
+                if unsafe { reader_error(reader) } != MPACK_OK {
+                    return;
+                }
                 done_type_impl(reader, tag.type_);
             }
             TYPE_ARRAY => {
