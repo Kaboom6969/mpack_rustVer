@@ -1,0 +1,7 @@
+target/
+artifacts/
+corpus/*/crash-*
+corpus/*/leak-*
+corpus/*/timeout-*
+corpus/*/oom-*
+*.log

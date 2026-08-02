@@ -6,6 +6,7 @@
 pub mod common;
 #[forbid(unsafe_code)]
 pub mod expect;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 #[forbid(unsafe_code)]
 pub mod node;

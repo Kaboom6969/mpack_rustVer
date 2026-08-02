@@ -1,0 +1,32 @@
+[package]
+name = "mpack-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mpack = { path = "..", default-features = false }
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "reader_diff"
+path = "fuzz_targets/reader_diff.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "node_diff"
+path = "fuzz_targets/node_diff.rs"
+doc = false
+test = false
+bench = false
