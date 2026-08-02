@@ -33,6 +33,23 @@ const TYPE_EXT: i32 = 11;
 unsafe extern "C" {
     fn test_malloc(size: usize) -> *mut c_void;
     fn free(pointer: *mut c_void);
+    /// Provided by the frozen suite under `MPACK_CUSTOM_ASSERT`.
+    fn mpack_assert_fail(message: *const c_char);
+    fn mpack_break_hit(message: *const c_char);
+}
+
+fn assert_fail(message: &[u8]) {
+    // SAFETY: Suite provides `mpack_assert_fail` (longjmp in unit tests).
+    unsafe {
+        mpack_assert_fail(message.as_ptr().cast());
+    }
+}
+
+fn break_hit(message: &[u8]) {
+    // SAFETY: Suite provides `mpack_break_hit`.
+    unsafe {
+        mpack_break_hit(message.as_ptr().cast());
+    }
 }
 
 fn expect_entry<T>(
@@ -275,8 +292,20 @@ macro_rules! expect_range_op {
             min_value: $ty,
             max_value: $ty,
         ) -> $ty {
-            expect_entry(reader, $zero, $zero, || {
-                expect_option(reader, $zero, |core| $core(core, min_value, max_value))
+            expect_entry(reader, min_value, min_value, || {
+                if min_value > max_value {
+                    assert_fail(b"min_value must be less than or equal to max_value\0");
+                    flag_error_impl(reader, MPACK_ERROR_BUG);
+                    return min_value;
+                }
+                if !prepare_scalar(reader) {
+                    return min_value;
+                }
+                read_with_core(
+                    reader,
+                    |core| $core(core, min_value, max_value).unwrap_or(min_value),
+                    || min_value,
+                )
             })
         }
     };
@@ -394,10 +423,24 @@ pub unsafe extern "C" fn mpack_expect_map_range(
     min_value: u32,
     max_value: u32,
 ) -> u32 {
-    expect_entry(reader, 0, 0, || {
-        compound_open(reader, TYPE_MAP, |core| {
-            expect::map_range(core, min_value, max_value)
-        })
+    expect_entry(reader, min_value, min_value, || {
+        if min_value > max_value {
+            assert_fail(b"min_value must be less than or equal to max_value\0");
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return min_value;
+        }
+        if !prepare_scalar(reader) {
+            return min_value;
+        }
+        let count = read_with_core(
+            reader,
+            |core| expect::map_range(core, min_value, max_value).unwrap_or(min_value),
+            || min_value,
+        );
+        if error_of(reader) == MPACK_OK {
+            push_type(reader, TYPE_MAP, count);
+        }
+        count
     })
 }
 
@@ -450,10 +493,24 @@ pub unsafe extern "C" fn mpack_expect_array_range(
     min_value: u32,
     max_value: u32,
 ) -> u32 {
-    expect_entry(reader, 0, 0, || {
-        compound_open(reader, TYPE_ARRAY, |core| {
-            expect::array_range(core, min_value, max_value)
-        })
+    expect_entry(reader, min_value, min_value, || {
+        if min_value > max_value {
+            assert_fail(b"min_value must be less than or equal to max_value\0");
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return min_value;
+        }
+        if !prepare_scalar(reader) {
+            return min_value;
+        }
+        let count = read_with_core(
+            reader,
+            |core| expect::array_range(core, min_value, max_value).unwrap_or(min_value),
+            || min_value,
+        );
+        if error_of(reader) == MPACK_OK {
+            push_type(reader, TYPE_ARRAY, count);
+        }
+        count
     })
 }
 
@@ -615,14 +672,14 @@ pub unsafe extern "C" fn mpack_expect_str_match(
     length: usize,
 ) {
     expect_entry(reader, (), (), || {
-        let Some(expected) = c_bytes(string, length) else {
-            flag_error_impl(reader, MPACK_ERROR_BUG);
-            return;
-        };
         if length > u32::MAX as usize {
             flag_error_impl(reader, MPACK_ERROR_TYPE);
             return;
         }
+        let Some(expected) = c_bytes(string, length) else {
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return;
+        };
         let got = expect_str_impl(reader);
         if error_of(reader) != MPACK_OK {
             return;
@@ -660,6 +717,11 @@ pub unsafe extern "C" fn mpack_expect_cstr(
     size: usize,
 ) {
     expect_entry(reader, (), (), || {
+        if size < 1 {
+            assert_fail(b"buffer size is zero; you must have room for at least a null-terminator\0");
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return;
+        }
         let length = expect_str_impl(reader) as usize;
         // SAFETY: Same contract as the public cstr reader export.
         unsafe {
@@ -678,6 +740,11 @@ pub unsafe extern "C" fn mpack_expect_utf8_cstr(
     size: usize,
 ) {
     expect_entry(reader, (), (), || {
+        if size < 1 {
+            assert_fail(b"buffer size is zero; you must have room for at least a null-terminator\0");
+            flag_error_impl(reader, MPACK_ERROR_BUG);
+            return;
+        }
         let length = expect_str_impl(reader) as usize;
         // SAFETY: Same contract as the public utf8_cstr reader export.
         unsafe {
@@ -696,6 +763,7 @@ fn expect_cstr_alloc_unchecked(
 ) -> *mut c_char {
     *out_length = 0;
     if maxsize < 1 {
+        break_hit(b"maxsize is zero; you must have room for at least a null-terminator\0");
         flag_error_impl(reader, MPACK_ERROR_BUG);
         return ptr::null_mut();
     }
@@ -840,7 +908,7 @@ pub unsafe extern "C" fn mpack_expect_bin_alloc(
                 if n <= max_payload {
                     Some(n)
                 } else {
-                    core.flag_error(crate::common::Error::TooBig);
+                    core.flag_error(crate::common::Error::Type);
                     None
                 }
             })
@@ -948,7 +1016,7 @@ pub unsafe extern "C" fn mpack_expect_ext_alloc(
                     if length <= max_payload {
                         Some((ext_type, length))
                     } else {
-                        core.flag_error(crate::common::Error::TooBig);
+                        core.flag_error(crate::common::Error::Type);
                         None
                     }
                 })

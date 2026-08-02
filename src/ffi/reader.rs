@@ -933,6 +933,14 @@ pub unsafe extern "C" fn mpack_reader_remaining(
             }
             return 0;
         }
+        let track_error = crate::ffi::stubs::track::track_check_empty(&state.track);
+        if track_error != MPACK_OK {
+            flag_error_on(state, reader, track_error);
+            if !data.is_null() {
+                unsafe { *data = ptr::null() };
+            }
+            return 0;
+        }
         let Some(remaining) = remaining_of(state) else {
             flag_error_impl(reader, MPACK_ERROR_BUG);
             if !data.is_null() {
@@ -1355,7 +1363,17 @@ fn discard_impl(reader: *mut MpackReader) {
         }
         match tag.type_ {
             TYPE_STR | TYPE_BIN | TYPE_EXT => {
-                skip_bytes_impl(reader, tag_length(&tag) as usize);
+                let length = tag_length(&tag) as usize;
+                let state = unsafe { borrow_reader(reader) };
+                let track_error = crate::ffi::stubs::track::track_bytes(&mut state.track, length);
+                if track_error != MPACK_OK {
+                    flag_error_on(state, reader, track_error);
+                    return;
+                }
+                skip_bytes_impl(reader, length);
+                if unsafe { reader_error(reader) } != MPACK_OK {
+                    return;
+                }
                 done_type_impl(reader, tag.type_);
             }
             TYPE_ARRAY => {

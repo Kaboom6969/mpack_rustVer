@@ -149,6 +149,7 @@ pub fn float_strict(reader: &mut Reader<'_>) -> Option<f32> {
 
 pub fn double_strict(reader: &mut Reader<'_>) -> Option<f64> {
     match reader.read_tag()? {
+        Tag::Float(value) => Some(f64::from(value)),
         Tag::Double(value) => Some(value),
         _ => type_error(reader),
     }
