@@ -188,6 +188,19 @@ impl<'buffer> Writer<'buffer> {
         }
     }
 
+    /// Writes a MessagePack v4 raw/string header, which never uses `str8`.
+    pub(crate) fn write_str_header_v4(&mut self, length: usize) {
+        if length <= 31 {
+            self.write_header(&[0xa0 | length as u8]);
+        } else if let Ok(length) = u16::try_from(length) {
+            self.write_header_with_value(0xda, &length.to_be_bytes());
+        } else if let Ok(length) = u32::try_from(length) {
+            self.write_header_with_value(0xdb, &length.to_be_bytes());
+        } else {
+            self.flag_too_big();
+        }
+    }
+
     /// Writes a binary header for `length` bytes.
     pub fn write_bin_header(&mut self, length: usize) {
         if let Ok(length) = u8::try_from(length) {

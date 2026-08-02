@@ -63,6 +63,20 @@ fn track_grow(track: &mut MpackTrack) -> MpackError {
 
 /// Pushes a typed element/byte count onto the track (C `mpack_track_push`).
 pub(crate) fn track_push(track: &mut MpackTrack, type_: c_int, count: u32) -> MpackError {
+    track_push_impl(track, type_, count, false)
+}
+
+/// Pushes a builder-owned compound entry.
+pub(crate) fn track_push_builder(track: &mut MpackTrack, type_: c_int) -> MpackError {
+    track_push_impl(track, type_, 0, true)
+}
+
+fn track_push_impl(
+    track: &mut MpackTrack,
+    type_: c_int,
+    count: u32,
+    builder: bool,
+) -> MpackError {
     if track.elements.is_null() {
         return MPACK_ERROR_BUG;
     }
@@ -78,7 +92,7 @@ pub(crate) fn track_push(track: &mut MpackTrack, type_: c_int, count: u32) -> Mp
             type_,
             left: count,
             key_needs_value: false,
-            builder: false,
+            builder,
         };
     }
     track.count += 1;
@@ -118,6 +132,11 @@ fn track_pop_impl(track: &mut MpackTrack, type_: c_int, builder: bool) -> MpackE
 /// Pops a non-builder track entry (C `mpack_track_pop`).
 pub(crate) fn track_pop(track: &mut MpackTrack, type_: c_int) -> MpackError {
     track_pop_impl(track, type_, false)
+}
+
+/// Pops a builder-owned compound entry.
+pub(crate) fn track_pop_builder(track: &mut MpackTrack, type_: c_int) -> MpackError {
+    track_pop_impl(track, type_, true)
 }
 
 fn track_peek_element_impl(track: &MpackTrack, read: bool) -> MpackError {

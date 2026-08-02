@@ -37,9 +37,9 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Decision | Choice | Why |
 | --- | --- | --- |
 | Safe writer core | `src/writer.rs` (`Writer`, `GrowableWriter`, `Builder`, `WriteTracker`) | Encode algorithms stay pointer-free; FFI maps C buffers/callbacks onto these types for the duration of a call. |
-| Writer FFI surface | `src/ffi/writer.rs` | Fixed buffer, growable (`malloc`/`realloc`), flush / error / teardown callbacks, filename/stdfile, compound start/build/complete, timestamps/ext, UTF-8 helpers. |
+| Writer FFI surface | `src/ffi/writer.rs` | Fixed buffer, growable (suite allocator under everything), flush / error / teardown callbacks, filename/stdfile, compound start/build/complete, timestamps/ext, UTF-8 helpers. |
 | Builder page storage | Rust side-table (`Mutex<HashMap<usize, …>>` keyed by writer pointer); ABI `builder` field left empty for layout | C stores builder pages inside `mpack_writer_t.builder`. The side-table keeps compound-size resolution without growing unsafe fields inside the C struct. Observable if C inspects builder pointers. |
-| Write-tracking hooks | `mpack_writer_track_*` are intentional no-ops | Layout/link under `full-suite-abi` needs the symbols; real element/byte tracking is not wired through FFI yet. Safe-core `WriteTracker` exists for Rust-only / port tests. |
+| Write-tracking hooks | Real FFI tracking under `full-suite-abi` | Initializes the ABI track stack and wires element, byte, compound, and builder push/pop checks through `src/ffi/stubs/track.rs`, including frozen-suite `mpack_break_hit` semantics. |
 | Embed-writer gate | `python3 tests/port/frozen-link/run.py --full` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` (see team ownership rules). |
 
 ## Reader vertical slice
@@ -107,20 +107,20 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 ### Tracking
 
 - **MPack**: Read/write track stacks enforce compound sizes when tracking is enabled.
-- **Rust intent**: Read tracking is real under `full-suite-abi` so Expect/Reader compound APIs match C; write tracking may stay deferred.
-- **Status**: Read track stack live in `src/ffi/stubs/track.rs` (push/pop/element/bytes/str_bytes_all/check_empty/destroy); Reader init/destroy/`done_type`/`read_tag`/`peek_tag`/`read_bytes`/`skip`/`remaining`/discard wired. Writer `mpack_writer_track_*` remain intentional no-ops.
+- **Rust intent**: Read and write tracking are real under `full-suite-abi` so compound APIs match C.
+- **Status**: The track stack lives in `src/ffi/stubs/track.rs` (push/pop/element/bytes/str_bytes_all/check_empty/destroy). Reader init/destroy/`done_type`/`read_tag`/`peek_tag`/`read_bytes`/`skip`/`remaining`/discard and Writer init/destroy/write/header/bytes/builder paths are wired.
 
 ### Memory ownership
 
 - **MPack**: Growable writers, `*_alloc` readers, and tree pools use `MPACK_MALLOC`; the suite frees with `MPACK_FREE` (`test_free` under frozen-link).
-- **Rust intent**: Pointers returned to C (reader/expect `*_alloc`, node stubs that return buffers) use `test_malloc` / `test_free`. Library-private buffers freed only inside FFI (file reader owned buffer, track stack, growable writer teardown) may use libc when never handed to suite `MPACK_FREE`. Never hand a Rust-global-allocator block to either free.
-- **Status**: Reader `mpack_read_bytes_alloc_impl`, Expect `*_alloc` / `array_alloc`, and Node `*_alloc` use suite hooks (`test_malloc`). Writer growable still libc (internal destroy).
+- **Rust intent**: Pointers returned to C (reader/expect `*_alloc`, node stubs that return buffers, growable writer output) use `test_malloc` / `test_free`. Library-private buffers freed only inside FFI (file reader owned buffer, track stack) may use libc. Never hand a Rust-global-allocator block to either free.
+- **Status**: Reader `mpack_read_bytes_alloc_impl`, Expect `*_alloc` / `array_alloc`, Node `*_alloc`, and growable Writer output use suite hooks under `full-suite-abi`. Growable resize mirrors MPack’s `MPACK_MALLOC` fallback: allocate, copy initialized bytes, free the prior block.
 
 ### Full-suite stubs vs real Reader / Expect FFI
 
 - **MPack**: One implementation for reader / expect / node / track / print.
 - **Rust intent**: Under `full-suite-abi`, replace stubs module-by-module with safe-core calls (do not grow unsafe in stub bodies).
-- **Status**: Reader / Expect / Node FFI are real under `full-suite-abi` (`src/ffi/{reader,expect,node}.rs`). Print helpers used by reader data-print live with reader; write-track stubs stay scaffolding.
+- **Status**: Reader / Expect / Node FFI are real under `full-suite-abi` (`src/ffi/{reader,expect,node}.rs`). Print helpers used by reader data-print live with reader; Writer FFI uses the shared track implementation.
 
 ### Safe-core surface shapes (Expect / Node)
 
