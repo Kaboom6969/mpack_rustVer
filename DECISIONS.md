@@ -17,7 +17,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | First vertical slice | Fixed-buffer writer (`nil` → `0xc0`) under embed-writer | Proved include path + link to the Rust library; growable / file / builder / full write surface followed. |
 | Default ABI feature | embed-writer layout (Cargo feature off) | Matches upstream `embed-writer` unit config so debug/release writer layouts stay identical. |
 | Everything-suite ABI | Cargo feature `full-suite-abi` | Switches `#[repr(C)]` to the upstream everything layout (extensions, tracking, builder, …). One library build cannot satisfy both layouts. |
-| C-visible allocators | libc `malloc` / `free` / `realloc` | The frozen suite frees pointers with libc; a Rust-global-allocator block handed to libc `free` would be undefined behaviour. |
+| C-visible allocators | Suite hooks `test_malloc` / `test_free` (`MPACK_MALLOC` / `MPACK_FREE`) for pointers returned to C; libc only for library-private buffers | Frozen everything links with `MPACK_FREE=test_free`, which adjusts `test_malloc_active`. Mixing libc `malloc` with suite `test_free` underflows the counter (`test-system.c`). Private file/writer buffers freed only inside FFI may still use libc. |
 | Everything-gate soft abort | Force-include soft `abort` redirect | Suite hardcodes `TEST_EARLY_EXIT`; soft abort lets the process print a failure summary instead of dying on the first assertion. Ops detail: `tests/port/frozen-link/README.md`. |
 
 ## FFI boundary and ownership
@@ -49,7 +49,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Safe reader core | `src/reader.rs` over `&[u8]` with sticky `Error` | Fixed-buffer decode without fill callbacks; FFI layers fill/skip/file on top. |
 | Reader FFI under `full-suite-abi` | `src/ffi/reader.rs` replaces former reader stubs | C owns `mpack_reader_t`; each decode builds a temporary safe-core `Reader` over `data..end`, advances `data` by `used()`, maps sticky errors through `flag_error` (including C’s `end = data` truncation). |
 | `mpack_discard` / `mpack_print_data_to_*` | Iterative heap frame stack | C uses recursive call stacks. Hostile deep nesting completes or sticky-errors instead of overflowing the Rust stack. Pseudo-JSON for normal inputs matches C (`tests/port/reader_ffi_safety.rs`). |
-| `mpack_read_bytes_alloc_impl` size + optional NUL | `checked_add`; wrap → sticky `mpack_error_too_big` | Stricter than upstream C’s latent overflow TODO on large sizes / 32-bit. |
+| `mpack_read_bytes_alloc_impl` size + optional NUL | `checked_add`; wrap → sticky `mpack_error_too_big`; allocate via `test_malloc` | Stricter than upstream C’s latent overflow TODO on large sizes / 32-bit. Suite frees with `test_free`, so alloc must use the same hook. |
 | UTF-8 / timestamp validation failure (safe core) | Sticky error; do **not** advance `Reader::used()` | Atomic cursor on validation failure. May diverge from C cursor consumption on the same paths; FFI can emulate C later if strict ABI parity is required. |
 | Read tracking / `mpack_done_type` | Real track stack via `src/ffi/stubs/track.rs`; `done_type` / destroy / `remaining` call push/pop/check_empty | Needed for `test_expect_tracking` and compound `done_*` under everything (`MPACK_READ_TRACKING=1`). Discard skips str/bin/ext only after `track_bytes` so sticky bug does not mask EOF. |
 | File init | Minimal `init_stdfile` / `init_filename` (owned buffer + fread fill / optional fseek skip) | Lets EOF loops reach `mpack_error_eof` without hanging the everything suite; fuller `test-file.c` / `test-buffer.c` streaming edge cases are not claimed green. |
@@ -108,9 +108,9 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 ### Memory ownership
 
-- **MPack**: Growable writers, `*_alloc` readers, and tree pools use malloc; the suite may `free` those pointers directly.
-- **Rust intent**: C-visible blocks use libc malloc/free/realloc; temporary Rust `Vec` / stack buffers are never handed to libc `free`.
-- **Status**: Growable writer, reader alloc, and Expect `*_alloc` FFI follow that contract. Node `*_alloc` FFI still stubs where present.
+- **MPack**: Growable writers, `*_alloc` readers, and tree pools use `MPACK_MALLOC`; the suite frees with `MPACK_FREE` (`test_free` under frozen-link).
+- **Rust intent**: Pointers returned to C (reader/expect `*_alloc`, node stubs that return buffers) use `test_malloc` / `test_free`. Library-private buffers freed only inside FFI (file reader owned buffer, track stack, growable writer teardown) may use libc when never handed to suite `MPACK_FREE`. Never hand a Rust-global-allocator block to either free.
+- **Status**: Reader `mpack_read_bytes_alloc_impl` and Expect `*_alloc` / `array_alloc` use suite hooks. Node `*_alloc` stubs already use `test_malloc`. Writer growable still libc (internal destroy).
 
 ### Full-suite stubs vs real Reader / Expect FFI
 

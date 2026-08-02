@@ -13,6 +13,21 @@ pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
 #[no_mangle]
 pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
 
+#[no_mangle]
+pub unsafe extern "C" fn test_malloc(size: usize) -> *mut std::ffi::c_void {
+    let layout = std::alloc::Layout::from_size_align(size.max(1), 8).unwrap();
+    unsafe { std::alloc::alloc_zeroed(layout) }.cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn test_free(pointer: *mut std::ffi::c_void) {
+    if pointer.is_null() {
+        return;
+    }
+    // Port shim: size is unknown; leak is acceptable for these unit tests.
+    let _ = pointer;
+}
+
 unsafe extern "C" {
     fn mpack_reader_init_data(reader: *mut MpackReader, data: *const i8, count: usize);
     fn mpack_reader_destroy(reader: *mut MpackReader) -> i32;

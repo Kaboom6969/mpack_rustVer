@@ -32,7 +32,7 @@ const TYPE_EXT: i32 = 11;
 
 unsafe extern "C" {
     fn test_malloc(size: usize) -> *mut c_void;
-    fn free(pointer: *mut c_void);
+    fn test_free(pointer: *mut c_void);
     /// Provided by the frozen suite under `MPACK_CUSTOM_ASSERT`.
     fn mpack_assert_fail(message: *const c_char);
     fn mpack_break_hit(message: *const c_char);
@@ -241,10 +241,10 @@ fn suite_alloc(size: usize) -> *mut u8 {
     unsafe { test_malloc(size.max(1)) }.cast()
 }
 
-fn libc_free(pointer: *mut c_void) {
+fn suite_free(pointer: *mut c_void) {
     if !pointer.is_null() {
-        // SAFETY: Pointer came from reader alloc (`malloc`).
-        unsafe { free(pointer) };
+        // SAFETY: Pointer came from suite/`test_malloc` (reader alloc path).
+        unsafe { test_free(pointer) };
     }
 }
 
@@ -805,7 +805,7 @@ pub unsafe extern "C" fn mpack_expect_cstr_alloc(
         // SAFETY: Alloc returned `length` payload bytes.
         let bytes = unsafe { slice::from_raw_parts(pointer.cast::<u8>(), length) };
         if bytes.contains(&0) {
-            libc_free(pointer.cast());
+            suite_free(pointer.cast());
             flag_error_impl(reader, MPACK_ERROR_TYPE);
             return ptr::null_mut();
         }
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn mpack_expect_utf8_cstr_alloc(
         // SAFETY: Alloc returned `length` payload bytes.
         let bytes = unsafe { slice::from_raw_parts(pointer.cast::<u8>(), length) };
         if !reader::check_utf8(bytes) || bytes.contains(&0) {
-            libc_free(pointer.cast());
+            suite_free(pointer.cast());
             flag_error_impl(reader, MPACK_ERROR_TYPE);
             return ptr::null_mut();
         }

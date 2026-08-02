@@ -37,6 +37,10 @@ const TYPE_EXT: c_int = 11;
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(pointer: *mut c_void);
+    /// Frozen-suite allocator (`MPACK_MALLOC` → `test_malloc`).
+    fn test_malloc(size: usize) -> *mut c_void;
+    /// Frozen-suite free (`MPACK_FREE` → `test_free`).
+    fn test_free(pointer: *mut c_void);
     fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
     fn fread(data: *mut c_void, size: usize, count: usize, file: *mut c_void) -> usize;
     fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
@@ -1288,7 +1292,9 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
             flag_error_on(state, reader, track_error);
             return ptr::null_mut();
         }
-        let pointer = unsafe { malloc(size.max(1)).cast::<c_char>() };
+        // C-visible: suite frees with `MPACK_FREE`/`test_free`, so allocate
+        // with `test_malloc` (not libc) to keep `test_malloc_active` honest.
+        let pointer = unsafe { test_malloc(size.max(1)).cast::<c_char>() };
         if pointer.is_null() {
             flag_error_impl(reader, MPACK_ERROR_MEMORY);
             return ptr::null_mut();
@@ -1303,7 +1309,7 @@ pub unsafe extern "C" fn mpack_read_bytes_alloc_impl(
             if let Some(error_fn) = state.error_fn {
                 unsafe { error_fn(reader, state.error) };
             }
-            unsafe { free(pointer.cast()) };
+            unsafe { test_free(pointer.cast()) };
             return ptr::null_mut();
         }
         if null_terminated {
