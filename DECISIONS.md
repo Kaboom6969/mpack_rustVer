@@ -20,6 +20,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Everything-suite ABI | Cargo feature `full-suite-abi` | Switches `#[repr(C)]` to the upstream everything layout (extensions, tracking, builder, …). One library build cannot satisfy both layouts. |
 | C-visible allocators | Suite hooks `test_malloc` / `test_free` (`MPACK_MALLOC` / `MPACK_FREE`) for pointers returned to C; under frozen-link also for file/track private buffers via `suite_libc` | Frozen everything links with `MPACK_FREE=test_free`, which adjusts `test_malloc_active`. Mixing libc `malloc` with suite `test_free` underflows the counter (`test-system.c`). |
 | Everything parity gate | Runner forwards C suite exit + `Unit testing complete. N failures` | Acceptance is the frozen harness itself (`tests/original/.../test.c`). Soft-abort / quiet printf are opt-in `--soft-continue` only (debug; still not fake green). `--expect-missing` removed. How-to: `tests/port/frozen-link/README.md`. |
+| Fair C↔Rust bench | `bench/`: same C driver; upstream C vs `full-suite-abi` staticlib; everything features + forced tracking; libc malloc (thin `test_*` identity wrappers for Rust symbol names); release opts | Measures the C ABI path under 2B feature lock, not safe-core and not suite fail-injection allocators. See `bench/methodology.md`. |
 
 ## FFI boundary and ownership
 
