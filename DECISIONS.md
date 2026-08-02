@@ -1,244 +1,136 @@
-# Decisions
+# DECISIONS
 
-Non-trivial behavioral, API, or layout differences from C MPack belong here.
+Non-trivial divergences from MPack (C) and why. Update this file whenever behavior, API surface, or layout differs from the original in a meaningful way.
 
-## Architecture intent
+## Kickoff / layout
 
-- **Safe Rust core**: idiomatic types (`Vec<u8>`, `Result`, enums for tags/errors).
-  Prefer zero `unsafe` in encode/decode algorithms.
-- **FFI layer** (planned): `#[repr(C)]` + `#[no_mangle] pub extern "C"` matching the
-  MPack C ABI (`mpack_reader_t`, `mpack_writer_t`, `mpack_tree_t`, `mpack_node_t`,
-  `mpack_tag_t`, `mpack_error_t`, …) so `tests/original/` links unchanged.
-- **Module order**: common → writer/reader → expect → node (mirrors C dependency order).
-- **Allocators**: C-visible buffers/nodes must use the same malloc/free contract as the
-  frozen suite (not the Rust global allocator for pointers the suite frees).
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Keep `original_c/` at repo root | Keep (not relocated) | Reference sources + differential builds without disturbing kickoff layout already in the repo. |
+| Original tests path | `tests/original/` | Port Mortem layout; tree hashed at kickoff (see `.port-mortem.toml`). **Do not modify.** |
+| New tests | `tests/port/` | Rust unit/integration tests that are not part of the frozen C suite. |
+| Dual-layer design | Safe Rust core + C ABI FFI | Passes original C tests without rewriting them; keeps idiomatic Rust for maintainability. |
+| Module map | `src/{common,writer,reader,expect,node}.rs` + `src/ffi/` | Mirrors C dependency order (common → writer/reader → expect → node). Safe modules stay `forbid(unsafe_code)`; raw pointers live only under `src/ffi/`. |
+| Public C headers / inlines | Upstream MPack headers; `mpack-platform.c` for header-inline ABI | Accessors such as `mpack_writer_error()` / buffer helpers stay C inline / platform TU. Rust does not re-export them. |
+| Frozen-suite link adapter | `tests/port/frozen-link/` links suite objects to the Rust library | Compiles `mpack-platform.c` only for inlines; does **not** compile C encoder/decoder/expect/node sources. How-to: `tests/port/frozen-link/README.md`. |
+| FFI layout probe | `tests/port/ffi-harness/` (+ C `sizeof`/`offsetof` checks) | Compares C and Rust layouts before behavioral tests; first end-to-end proof path for the writer ABI. |
+| First vertical slice | Fixed-buffer writer (`nil` → `0xc0`) under embed-writer | Proved include path + link to the Rust library; growable / file / builder / full write surface followed. |
+| Default ABI feature | embed-writer layout (Cargo feature off) | Matches upstream `embed-writer` unit config so debug/release writer layouts stay identical. |
+| Everything-suite ABI | Cargo feature `full-suite-abi` | Switches `#[repr(C)]` to the upstream everything layout (extensions, tracking, builder, …). One library build cannot satisfy both layouts. |
+| C-visible allocators | libc `malloc` / `free` / `realloc` | The frozen suite frees pointers with libc; a Rust-global-allocator block handed to libc `free` would be undefined behaviour. |
+| Everything-gate soft abort | Force-include soft `abort` redirect | Suite hardcodes `TEST_EARLY_EXIT`; soft abort lets the process print a failure summary instead of dying on the first assertion. Ops detail: `tests/port/frozen-link/README.md`. |
 
-## Divergences
+## FFI boundary and ownership
 
-### Audited unsafe boundary
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Safe encode/decode modules | `forbid(unsafe_code)` on `common` / `writer` / `reader` / `expect` / `node` | Keeps MessagePack algorithms free of raw pointers; every `# Safety` contract for C pointers lives in `src/ffi/`. |
+| C-visible structs | No Rust references, trait objects, or `Box` stored in ABI types | FFI builds a temporary slice for one operation, calls safe core, then advances C cursors (`data` / buffer used). Storing Rust borrows in `mpack_*_t` would outlive the operation. |
+| Authoritative C objects | C owns `mpack_writer_t` / `mpack_reader_t` / `mpack_tree_t` storage | Matches the frozen suite: tests allocate C structs on the stack and pass pointers into the library. |
+| `mpack_error_t` representation | `c_int` constants with the intentional gap (`ok = 0`, `io = 2`) | Reading an unknown C integer as a Rust fieldless enum would be undefined behavior; mapping from `common::Error` is explicit. |
+| Null writer / reader / buffer | Fail-closed sticky `mpack_error_bug` (or early return); no dereference | C often `mpack_assert`s on null. Rust FFI hardens the boundary; validity and exclusivity of non-null pointers remain caller requirements. |
+| `set_fill` / `set_skip` with `size == 0` | Sticky `mpack_error_bug`; do not install the callback | C uses `mpack_assert` (fatal in debug). This port fail-closes like other invalid FFI setup (see `src/ffi/reader.rs`). |
+| Unwinding panics in exports | `catch_unwind` → sticky `mpack_error_bug` where a writer/reader exists | Contains panics at the ABI edge (`src/ffi/guard.rs`). Ineffective if the crate is built with `panic = "abort"`. |
 
-Safe encoding and decoding modules are compiled with `forbid(unsafe_code)`.
-Raw-pointer access is restricted to `src/ffi/`, where each unsafe block states
-its safety contract. The FFI layer does not store Rust references, trait
-objects, or `Box` values in C-visible structs. It creates a temporary slice
-only for the duration of an operation and immediately calls the safe core.
+## Writer vertical slice
 
-### Initial ABI configuration
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Safe writer core | `src/writer.rs` (`Writer`, `GrowableWriter`, `Builder`, `WriteTracker`) | Encode algorithms stay pointer-free; FFI maps C buffers/callbacks onto these types for the duration of a call. |
+| Writer FFI surface | `src/ffi/writer.rs` | Fixed buffer, growable (`malloc`/`realloc`), flush / error / teardown callbacks, filename/stdfile, compound start/build/complete, timestamps/ext, UTF-8 helpers. |
+| Builder page storage | Rust side-table (`Mutex<HashMap<usize, …>>` keyed by writer pointer); ABI `builder` field left empty for layout | C stores builder pages inside `mpack_writer_t.builder`. The side-table keeps compound-size resolution without growing unsafe fields inside the C struct. Observable if C inspects builder pointers. |
+| Write-tracking hooks | `mpack_writer_track_*` are intentional no-ops | Layout/link under `full-suite-abi` needs the symbols; real element/byte tracking is not wired through FFI yet. Safe-core `WriteTracker` exists for Rust-only / port tests. |
+| Embed-writer gate | `python3 tests/port/frozen-link/run.py --full` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` (see team ownership rules). |
 
-The first C ABI slice supports the upstream `embed-writer` configuration only:
-writer enabled, with reader, expect, node, stdlib, stdio, compatibility,
-extensions, builder, allocation, and write tracking disabled. This keeps the
-debug and release layouts identical. It is not ABI-compatible with MPack
-configurations that add conditional fields to `mpack_writer_t`.
+## Reader vertical slice
 
-The C harness supplies an explicit `mpack-config.h` and includes the complete
-upstream header chain. It compares C `sizeof`/`offsetof` values with Rust before
-testing behavior. Header-inline functions such as
-`mpack_writer_buffer_used()` and `mpack_writer_error()` remain C inline
-functions and are not exported by Rust.
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Safe reader core | `src/reader.rs` over `&[u8]` with sticky `Error` | Fixed-buffer decode without fill callbacks; FFI layers fill/skip/file on top. |
+| Reader FFI under `full-suite-abi` | `src/ffi/reader.rs` replaces former reader stubs | C owns `mpack_reader_t`; each decode builds a temporary safe-core `Reader` over `data..end`, advances `data` by `used()`, maps sticky errors through `flag_error` (including C’s `end = data` truncation). |
+| `mpack_discard` / `mpack_print_data_to_*` | Iterative heap frame stack | C uses recursive call stacks. Hostile deep nesting completes or sticky-errors instead of overflowing the Rust stack. Pseudo-JSON for normal inputs matches C (`tests/port/reader_ffi_safety.rs`). |
+| `mpack_read_bytes_alloc_impl` size + optional NUL | `checked_add`; wrap → sticky `mpack_error_too_big` | Stricter than upstream C’s latent overflow TODO on large sizes / 32-bit. |
+| UTF-8 / timestamp validation failure (safe core) | Sticky error; do **not** advance `Reader::used()` | Atomic cursor on validation failure. May diverge from C cursor consumption on the same paths; FFI can emulate C later if strict ABI parity is required. |
+| Read tracking / `mpack_done_type` | No-op (`done_type` empty; no `track_check_empty` on destroy yet) | Tracking-enabled header inlines must not poison the reader before a real track stack is wired. |
+| File init | Minimal `init_stdfile` / `init_filename` (owned buffer + fread fill / optional fseek skip) | Lets EOF loops reach `mpack_error_eof` without hanging the everything suite; fuller `test-file.c` / `test-buffer.c` streaming edge cases are not claimed green. |
 
-### ABI error representation
+## Expect table
 
-The FFI layer represents `mpack_error_t` as `c_int` constants, including the
-intentional gap between `mpack_ok = 0` and `mpack_error_io = 2`. It does not use
-a Rust fieldless enum because reading an unknown C integer as a Rust enum would
-be undefined behavior. Mapping from the safe `Error` type to ABI codes is
-explicit.
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Safe-core shape | Free functions on `&mut Reader<'_>`; `ExpectCompound { is_nil, count }` for `*_or_nil` | Mirrors `mpack_expect_*(reader)` without a second parser; FFI can map to C `(bool, *count)` without inventing another shape. |
+| Rust keywords | `r#bool` / `r#str`; `true_` / `false_` | Locked names for C `mpack_expect_bool` / `mpack_expect_str` / true/false expects. |
+| Allocator-backed expects | Stay in FFI only (`*_alloc`, `char*` copies) | Safe core must not return allocator-owned pointers; teammates fill `src/expect.rs` bodies only. |
+| Expect C ABI under `full-suite-abi` | Thin stubs → sticky `mpack_error_unsupported` | Safe core is filled and covered by `tests/port/expect_core.rs`; FFI still scaffolding. Suite weight for typed reads lives in `test-expect.c` until stubs are replaced. |
 
-### Null pointers and panics
+## Node table
 
-The original C implementation asserts on a null writer during initialization.
-The Rust FFI instead avoids dereferencing null: void functions return early and
-`mpack_writer_destroy(NULL)` returns `mpack_error_bug`. A null buffer
-initializes a non-null writer into `mpack_error_bug`. This is deliberate FFI
-hardening; validity and exclusivity of non-null pointers remain caller
-requirements.
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Safe-core surface | Minimal locked `Tree` / `Node` API (`type_`, `&[u8]` payloads, no `*_alloc`) | Contract for later FFI wrapping; stream/file/pool/`copy_*` / print-to-file stay in FFI. Signature changes need lead approval and a row here. |
+| Sticky errors on the tree | `Cell<Error>` shared through `&Tree` | Matches C `mpack_node_*` writing the tree error so accessors can flag through an immutable `Node` handle. |
+| `as_f32` | `Tag::Float` only (no int/double widen) | Intentional minimal freeze vs full C `mpack_node_float` widening. |
+| Required map lookup miss (`map_uint` / `map_str`) | Flag `Error::Data` | Optional/contains variants are not part of the locked surface. |
+| Duplicate map keys | Not diagnosed | Out of the minimal freeze; C may expose richer diagnostics in some paths. |
+| `Tree::parse` nesting | Recursive `parse_node` | C tree parse is iterative (`mpack-node.c`). Deep nesting can blow the Rust stack (contrast with iterative Reader FFI discard/print). |
+| Node C ABI under `full-suite-abi` | Thin stubs → sticky `unsupported` / nil nodes | Safe core is implemented and covered by `tests/port/node_api.rs`; C `test-node.c` stays red until FFI wraps the tree. |
 
-Every exported function contains unwinding panics with `catch_unwind` and
-falls back to `mpack_error_bug` where a writer is available. This cannot catch
-process-aborting panics if a consumer builds the library with `panic = "abort"`.
+## Technical decisions (hotspots)
 
-### Deferred writer features
+### Dual ABI layouts
 
-The initial slice clears the flush, error, teardown, and context fields during
-initialization. It supports an explicitly requested fixed-buffer
-`mpack_writer_flush_message()` callback, but allocator-backed writers, error
-and teardown callbacks, tracking, builder support, and full frozen-suite
-behavioral parity are deferred to later vertical slices.
+- **MPack**: Compile-time `mpack-config.h` toggles fields on `mpack_writer_t` / `mpack_reader_t` / tags.
+- **Rust intent**: Two explicit Cargo layouts — default embed-writer vs `full-suite-abi` — rather than one mega-struct with cfg soup in every export.
+- **Status**: Mutually exclusive. Layout checks live under `tests/port/full_abi_layout.rs` and frozen-link. Embed-writer frozen-link is the Writer gate; everything uses `full-suite-abi` + staticlib on Windows so suite symbols (`test_malloc`, `mpack_assert_fail`) resolve.
 
-### Frozen-suite link adapter
+### Sticky errors / NULL / assert
 
-`tests/port/frozen-link/` compiles `mpack-platform.c` only to emit MPack's
-header-inline ABI definitions, then links the frozen test objects to the Rust
-`cdylib`. It does not compile any C encoder, decoder, expect, or node source.
-This adapter is necessary because C11 header inlines such as
-`mpack_writer_error()` require one external definition in debug builds.
+- **MPack**: Sticky `mpack_error_t` on reader/writer/tree; many invalid setups `mpack_assert` (debug abort) or leave behavior undefined.
+- **Rust intent**: Safe core uses `common::Error`; FFI maps to ABI codes. At the FFI edge, prefer fail-closed sticky `bug` / early return over assert-abort; map unwinding panics to sticky errors when possible.
+- **Status**: Writer and Reader FFI harden null / zero-size setup. This is FFI hardening, not a claim that concurrent mutation of a single C object is safe.
+- **Intentional hardening**:
+  - `mpack_writer_destroy(NULL)` → `mpack_error_bug` (no dereference).
+  - Null reader buffer / `set_fill`/`set_skip` with `size == 0` → sticky `bug`.
 
-### Full-suite ABI stubs
+### Nesting depth & recursion
 
-The `full-suite-abi` Cargo feature switches `#[repr(C)]` layouts to the upstream
-everything unit-test configuration (compatibility, extensions, malloc reserve,
-builder, and read/write tracking). Under this feature, missing reader, expect,
-node, track, and print exports are thin stubs that set sticky
-`mpack_error_unsupported` and return zero/nil/`NULL`.
+- **MPack**: Recursive discard / print on the reader; iterative tree parse in node; depth/stack matter for hostile inputs.
+- **Rust intent**: Prefer heap frame stacks at the FFI reader boundary for hostile depth; match observable results for well-formed / truncated inputs.
+- **Status**: Reader FFI `discard` / `print_data_to_*` are iterative. Safe-core `node::Tree::parse` is still recursive — document before changing either. Extreme nesting on discard/print completes or sticky-errors instead of stack overflow.
 
-Stubs are temporary scaffolding for the
-`python3 tests/port/frozen-link/run.py --full --everything` feedback loop
-(C `everything` macros; `--default-config` remains an alias). They do not change
-the final unsafe budget: each export remains a required C ABI entry, safe
-encode/decode stays in `forbid(unsafe_code)` modules, and stub bodies are
-replaced with safe-core calls rather than grown in place.
+### Tracking
 
-The everything adapter force-includes a soft `abort` redirect so the frozen
-suite's hardcoded `TEST_EARLY_EXIT` does not stop the process before printing
-the failure summary. It also links a quiet `printf` override so soft-continued
-assertion spam does not dominate runtime. Both are scaffolding-only and are not
-used by the embed-writer gate.
+- **MPack**: Read/write track stacks enforce compound sizes when tracking is enabled.
+- **Rust intent**: Keep ABI symbols linkable without poisoning sticky errors before real tracking lands.
+- **Status**: Not wired end-to-end.
+- **Policy today**:
+  - Writer `mpack_writer_track_*` no-op voids.
+  - Reader `mpack_done_type` no-op.
+  - `src/ffi/stubs/track.rs` returns `mpack_ok` (does **not** set `unsupported`).
+  - Replace these consistently when installing a real track stack.
 
-Full-suite frozen-link builds with `cargo rustc --crate-type staticlib` so
-suite-provided symbols (`test_malloc`, `mpack_assert_fail`) resolve when linking
-the final executable. A Windows `cdylib` cannot leave those undefined at DLL
-link time.
+### Memory ownership
 
-Everything-gate crash detection treats exit `< 0` or `>= 128` as failure
-(Linux signal encoding and Windows SEH / abnormal statuses such as
-`0xC0000005`); normal assertion failure is `EXIT_FAILURE` (`1`). The gate
-expects GCC/MinGW (`CC=gcc`); the MSVC `cl` path does not force-include the
-soft-abort / quiet-printf adapters.
+- **MPack**: Growable writers, `*_alloc` readers, and tree pools use malloc; the suite may `free` those pointers directly.
+- **Rust intent**: C-visible blocks use libc malloc/free/realloc; temporary Rust `Vec` / stack buffers are never handed to libc `free`.
+- **Status**: Growable writer and reader alloc helpers follow that contract. Expect/Node `*_alloc` FFI still stubs where present.
 
-`soft_abort.h` includes `<stdlib.h>` before `#define abort mpack_soft_abort`
-so libc's noreturn `abort` declaration is not rewritten onto
-`mpack_soft_abort` (which would omit call-site epilogues and trip stack
-canaries when the soft abort returns).
+### Full-suite stubs vs real Reader FFI
 
-`mpack_discard` under stubs formerly forced `mpack_error_eof` even when init
-already set `mpack_error_unsupported`, so EOF-wait loops such as
-`test_file_read_eof` could terminate after soft-continued assertions. That hack
-is obsolete now that Reader FFI provides real discard plus stdfile/filename
-init (see “Reader FFI (fixed-buffer first slice)” below).
+- **MPack**: One implementation for reader / expect / node / track / print.
+- **Rust intent**: Under `full-suite-abi`, replace stubs module-by-module with safe-core calls (do not grow unsafe in stub bodies).
+- **Status**: Reader FFI is real (`src/ffi/reader.rs`). Expect and Node FFI remain stubs (`src/ffi/stubs/expect.rs`, `stubs/node.rs`). Print helpers used by reader data-print live with reader; leftover print/track stubs are scaffolding only.
 
-The default (feature-off) build keeps the embed-writer ABI used by the existing
-green frozen-link gate. A single library build cannot satisfy both layouts at once.
+### Safe-core surface shapes (Expect / Node)
 
-### Reader FFI (fixed-buffer first slice)
+- **MPack**: Pointer-rich `mpack_expect_*` / `mpack_node_*` / pools / `*_alloc` / `char*` copies.
+- **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node stays the minimal locked `Tree` / `Node` list. Allocation and C string copies stay in `src/ffi/`.
+- **Status**: Safe-core Expect and Node bodies are implemented (`tests/port/expect_core.rs`, `tests/port/node_api.rs`). FFI wrapping is the remaining gap for `test-expect.c` / `test-node.c`.
+- **Signature changes** to locked safe-core exports require lead approval and a row in the Expect / Node tables above.
 
-Under `full-suite-abi`, [`src/ffi/reader.rs`](src/ffi/reader.rs) replaces the
-former `stubs/reader.rs` exports. Pattern matches Writer FFI: C owns
-`mpack_reader_t` storage; each decode builds a temporary safe-core
-`reader::Reader` over `data..end` (after `ensure` / fill when needed), advances
-`data` by `used()`, and maps sticky errors through `flag_error` (including
-C’s `end = data` truncation).
+## Explicit non-goals (for now)
 
-This slice targets `test-reader.c` green under
-`python3 tests/port/frozen-link/run.py --full --everything`:
-
-- Real `init` / `init_data` / `init_error` / `destroy` / `flag_error` /
-  `remaining` / `set_fill` / `set_skip`
-- `read_tag` / `peek_tag` / **iterative** `discard` / `read_bytes` /
-  `skip_bytes` / inplace / UTF-8 / cstr / alloc / timestamp helpers
-- `ensure_straddle` / `read_native_straddle` with minimal fill refill
-- `mpack_print_data_to_buffer` via safe-core (JSON-ish / bin hexdump)
-- Minimal `init_stdfile` / `init_filename` (owned 4KiB buffer + fread fill /
-  optional fseek skip + teardown) so file EOF loops can reach `mpack_error_eof`
-  without hanging the everything suite
-- `mpack_read_bytes_alloc_impl` uses `checked_add` for the optional NUL byte;
-  wrap → sticky `mpack_error_too_big` (stricter than upstream C’s latent
-  overflow TODO on 32-bit). Covered by `tests/port/reader_ffi_safety.rs`.
-- FFI `discard` is **iterative** (heap `Vec` frame stack) rather than C’s
-  recursive call stack, so hostile deep nesting cannot blow the Rust stack.
-  Observable results for well-formed / truncated inputs match C; only the
-  failure mode for extreme depth differs (completes or sticky decode error
-  instead of stack overflow).
-- FFI `mpack_print_data_to_*` uses the same **iterative** frame-stack approach
-  for compound pretty-print (C remains recursive). Pseudo-JSON output for
-  normal inputs is unchanged; extreme nesting completes without stack overflow.
-- `mpack_reader_set_skip` with `size == 0` (e.g. after `init_data`) flags sticky
-  `mpack_error_bug` and does not install the callback. C uses `mpack_assert`
-  (fatal in debug); this port fail-closes like `set_fill`.
-
-Frozen-link scaffolding: `tests/port/frozen-link/run.py` creates a repo-root
-`test` symlink to `tests/original/test` before running the everything suite so
-relative fixture paths (`test/messagepack/...`, `test/pseudojson/...`) resolve.
-Without that link, `test_compare_print` soft-continues on a missing expected
-file and then `memcmp`s a NULL pointer (SIGSEGV) once `print_data_to_file`
-writes a non-empty actual file.
-
-Deferred (Expect / buffer / fuller file parity):
-
-- Real `mpack_track_*` stack: `mpack_done_type` is intentionally a **no-op** so
-  tracking-enabled header inlines do not poison the reader. `remaining` /
-  `destroy` do not call `track_check_empty` / `track_destroy` yet.
-- Expect FFI still stubs; most behavioral weight for “reader” in the frozen
-  suite still lives under `test-expect.c`.
-- Full streaming buffer edge cases in `test-buffer.c` / `test-file.c` are not
-  claimed green by this slice.
-
-### Safe-core API freeze (Node, minimal)
-
-Public items in `src/node.rs` are a **minimal** frozen contract for teammate
-tree/DOM work and later FFI wrapping. Signature or public type changes require
-lead approval.
-
-**Bodies are intentional stubs** (`Tree::parse` starts as `Error::Unsupported`,
-accessors no-op / flag unsupported). Teammate A owns filling implementations
-until `tests/port/node_api.rs` acceptance tests (currently `#[ignore]`) pass.
-
-Locked surface:
-
-- `Tree<'data>::parse(&[u8])`, `error`, `flag_error`, `root`
-- `Node<'tree, 'data>`: `tag`, `type_`, `is_nil`, `as_bool`, `as_u64`, `as_i64`,
-  `as_f32`, `as_f64`, `str_bytes`, `bin_bytes`, `ext`, `array_len`, `array_at`,
-  `map_count`, `map_key_at`, `map_value_at`, `map_uint`, `map_str`
-- Sticky errors use `common::Error` on the tree. `Node` accessors may flag
-  errors through `&Tree` (`Cell<Error>`), matching C `mpack_node_*` behavior.
-- Payload views are `&[u8]` borrowed from the input slice (no allocator-owned
-  returns). `type_` avoids the `type` keyword.
-- Out of safe-core scope (FFI / lead): stream/file/stdfile init, C node pools,
-  `*_alloc`, `copy_*` into C `char*`, print-to-file, and optional/contains/
-  enum helpers beyond this minimal list.
-- Teammates may fill bodies and add `tests/port/node_*.rs` only; do not grow
-  the public surface without lead approval. When acceptance tests pass, remove
-  their `#[ignore]` attributes.
-
-Intentional minimal divergences vs full C `mpack-node` (once implemented):
-
-- `as_f32` accepts only `Tag::Float` (no integer/double widen yet).
-- Required map lookups (`map_uint` / `map_str`) flag `Error::Data` when missing;
-  optional/contains variants are not locked yet.
-- Duplicate map keys are not diagnosed in this freeze.
-
-### Safe-core API freeze (Reader + Expect)
-
-Public items in `src/reader.rs` and `src/expect.rs` are a frozen contract for
-teammate safe-core work and later FFI wrapping:
-
-- Teammates may fill or fix function bodies and add tests under `tests/port/`
-  only. Signature or public type changes require lead approval.
-- These modules stay under `forbid(unsafe_code)`: no raw pointers, no C
-  callbacks, and no APIs that return allocator-owned `*mut` pointers.
-- Sticky errors use `common::Error`; a failed operation leaves
-  `reader.error()` set (same model as `Reader::read_tag`).
-- Expect is free functions taking `&mut Reader<'_>` (mirrors
-  `mpack_expect_*(reader)`). It must not grow a second parser.
-- Out of safe-core scope (FFI / lead): `init_filename` / `init_stdfile`,
-  fill+skip callbacks, `malloc` / `*_alloc`, and copying into C `char*` at the
-  ABI boundary. Safe core may expose `&[u8]` / `&mut [u8]` helpers; allocation
-  and pointer conversion stay in `src/ffi/`.
-- `*_or_nil` results use `expect::ExpectCompound { is_nil, count }` so FFI can
-  map to `(bool, *count)` without inventing another shape.
-- Rust keywords force raw identifiers for two Expect exports: `expect::r#bool`
-  and `expect::r#str` (still the locked names for C `mpack_expect_bool` /
-  `mpack_expect_str`). `true_` / `false_` avoid the `true` / `false` keywords.
-
-### Reader cursor atomicity on validation failure
-
-The safe-core Reader treats UTF-8 validation failures (`read_bytes_utf8`) and
-timestamp validation failures (`read_timestamp`) as atomic with respect to the
-input cursor: on failure, the reader flags a sticky error and does not advance
-`Reader::used()`.
-
-This may diverge from the C reader's cursor semantics for the same failure
-conditions. If strict C parity is required at the ABI boundary, the FFI layer
-may need to emulate C cursor consumption behavior while still mapping to the
-safe-core Reader helpers.
-
+- Replacing the frozen C suite with `tests/port/` as the sole correctness proof for a claimed module.
+- Wrapping the C library from Rust (disallowed by Port Mortem rules).
+- Satisfying embed-writer and everything ABI layouts in a single library build.
+- Editing `tests/original/` (or any frozen C suite path).

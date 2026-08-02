@@ -18,7 +18,7 @@ When the task is **Reader/Expect safe-core implementation** (teammate lane), fol
 
 ## Frozen public API (teammate lane)
 
-- Do not change public signatures without lead approval (`DECISIONS.md` → Safe-core API freeze).
+- Do not change public signatures without lead approval (`DECISIONS.md` → Expect / Node tables and “Safe-core surface shapes” hotspot).
 - Fill or fix function bodies; add port tests only.
 - Expect stays free functions on `&mut Reader<'_>`.
 - Keep `ExpectCompound` for `*_or_nil`. Use `r#bool` / `r#str` / `true_` / `false_`.

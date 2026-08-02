@@ -1,4 +1,4 @@
-//! Frozen minimal Node API: stub smoke + acceptance tests for teammate fill-in.
+//! Minimal Node safe-core acceptance tests (see `DECISIONS.md` Node table).
 
 use mpack::common::{Error, Tag, Type};
 use mpack::node::Tree;

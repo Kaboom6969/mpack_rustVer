@@ -1,8 +1,8 @@
 //! Schema-typed reads on top of the reader (mirrors `mpack-expect`).
 //!
-//! Public free functions here are a frozen safe-core contract (see
-//! `DECISIONS.md`). Teammates may fill or fix bodies; signature changes need
-//! lead approval. Allocator-backed `*_alloc` APIs stay in FFI only.
+//! Public free functions here are a frozen safe-core contract. Signature
+//! changes need lead approval and a `DECISIONS.md` entry (Expect table /
+//! hotspots). Allocator-backed `*_alloc` APIs stay in FFI only.
 
 use crate::common::{Error, Tag, Timestamp};
 use crate::reader::{self, Reader};

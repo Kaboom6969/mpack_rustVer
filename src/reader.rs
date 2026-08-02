@@ -1,9 +1,9 @@
 //! Incremental / buffered decoder (mirrors `mpack-reader`).
 //!
-//! Public methods on [`Reader`] are a frozen safe-core contract (see
-//! `DECISIONS.md`). Teammates may fill bodies; signature changes need lead
-//! approval. Streaming fill, file init, and `done_*` tracking stay out of this
-//! module (FFI / later slices).
+//! Public methods on [`Reader`] are a frozen safe-core contract. Signature
+//! changes need lead approval and a `DECISIONS.md` entry (Reader vertical
+//! slice / hotspots). Streaming fill, file init, and `done_*` tracking stay out
+//! of this module (FFI / later slices).
 
 use crate::common::{Error, Tag, Timestamp, TIMESTAMP_NANOSECONDS_MAX};
 
