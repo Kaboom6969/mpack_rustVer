@@ -247,6 +247,17 @@ pub unsafe extern "C" fn mpack_writer_destroy(writer: *mut MpackWriter) -> Mpack
         // SAFETY: The C API requires `writer` to point to an initialized
         // `mpack_writer_t`. The null case was handled above.
         let state = unsafe { &mut *writer };
+        // Track cleanup must precede flush/teardown (C `mpack_writer_destroy`
+        // and reader destroy). Incomplete compounds sticky-error first so a
+        // growable teardown does not hand the buffer to C.
+        #[cfg(feature = "full-suite-abi")]
+        {
+            let cancel = state.error != MPACK_OK;
+            let track_error = crate::ffi::stubs::track::track_destroy(&mut state.track, cancel);
+            if state.error == MPACK_OK && track_error != MPACK_OK {
+                flag_error_impl(writer, track_error);
+            }
+        }
         if state.error == MPACK_OK && state.position != state.buffer {
             if let Some(flush) = state.flush.take() {
                 let used = state.position as usize - state.buffer as usize;
@@ -257,14 +268,6 @@ pub unsafe extern "C" fn mpack_writer_destroy(writer: *mut MpackWriter) -> Mpack
             unsafe { teardown(writer) };
         }
         clear_builder_state(writer);
-        #[cfg(feature = "full-suite-abi")]
-        {
-            let cancel = state.error != MPACK_OK;
-            let track_error = crate::ffi::stubs::track::track_destroy(&mut state.track, cancel);
-            if state.error == MPACK_OK && track_error != MPACK_OK {
-                flag_error_impl(writer, track_error);
-            }
-        }
         state.error
     }) {
         Ok(error) => error,

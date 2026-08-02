@@ -106,9 +106,10 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 ### Tracking
 
-- **MPack**: Read/write track stacks enforce compound sizes when tracking is enabled.
-- **Rust intent**: Read and write tracking are real under `full-suite-abi` so compound APIs match C.
+- **MPack**: Read/write track stacks enforce compound sizes when tracking is enabled. `mpack_writer_destroy` / `mpack_reader_destroy` destroy the track stack before flush/teardown; C discards `mpack_track_destroy`'s return value on the writer path.
+- **Rust intent**: Read and write tracking are real under `full-suite-abi` so compound APIs match C. Writer destroy runs track cleanup before flush/teardown (same order as C / reader) so incomplete compounds sticky-error before growable teardown can hand a buffer to C.
 - **Status**: The track stack lives in `src/ffi/stubs/track.rs` (push/pop/element/bytes/str_bytes_all/check_empty/destroy). Reader init/destroy/`done_type`/`read_tag`/`peek_tag`/`read_bytes`/`skip`/`remaining`/discard and Writer init/destroy/write/header/bytes/builder paths are wired.
+- **Divergence**: Unlike C's writer destroy (which ignores `mpack_track_destroy`'s return), this port maps a track-destroy failure into sticky `mpack_error_bug` via `flag_error_impl` when the writer was still `ok`, matching reader destroy and preventing a successful growable hand-off after an incomplete message.
 
 ### Memory ownership
 
