@@ -111,12 +111,61 @@ so libc's noreturn `abort` declaration is not rewritten onto
 `mpack_soft_abort` (which would omit call-site epilogues and trip stack
 canaries when the soft abort returns).
 
-`mpack_discard` under stubs forces `mpack_error_eof` even when init already set
-`mpack_error_unsupported`, so EOF-wait loops such as `test_file_read_eof` can
-terminate after soft-continued assertions.
+`mpack_discard` under stubs formerly forced `mpack_error_eof` even when init
+already set `mpack_error_unsupported`, so EOF-wait loops such as
+`test_file_read_eof` could terminate after soft-continued assertions. That hack
+is obsolete now that Reader FFI provides real discard plus stdfile/filename
+init (see “Reader FFI (fixed-buffer first slice)” below).
 
 The default (feature-off) build keeps the embed-writer ABI used by the existing
 green frozen-link gate. A single library build cannot satisfy both layouts at once.
+
+### Reader FFI (fixed-buffer first slice)
+
+Under `full-suite-abi`, [`src/ffi/reader.rs`](src/ffi/reader.rs) replaces the
+former `stubs/reader.rs` exports. Pattern matches Writer FFI: C owns
+`mpack_reader_t` storage; each decode builds a temporary safe-core
+`reader::Reader` over `data..end` (after `ensure` / fill when needed), advances
+`data` by `used()`, and maps sticky errors through `flag_error` (including
+C’s `end = data` truncation).
+
+This slice targets `test-reader.c` green under
+`python3 tests/port/frozen-link/run.py --full --everything`:
+
+- Real `init` / `init_data` / `init_error` / `destroy` / `flag_error` /
+  `remaining` / `set_fill` / `set_skip`
+- `read_tag` / `peek_tag` / **iterative** `discard` / `read_bytes` /
+  `skip_bytes` / inplace / UTF-8 / cstr / alloc / timestamp helpers
+- `ensure_straddle` / `read_native_straddle` with minimal fill refill
+- `mpack_print_data_to_buffer` via safe-core (JSON-ish / bin hexdump)
+- Minimal `init_stdfile` / `init_filename` (owned 4KiB buffer + fread fill /
+  optional fseek skip + teardown) so file EOF loops can reach `mpack_error_eof`
+  without hanging the everything suite
+- `mpack_read_bytes_alloc_impl` uses `checked_add` for the optional NUL byte;
+  wrap → sticky `mpack_error_too_big` (stricter than upstream C’s latent
+  overflow TODO on 32-bit). Covered by `tests/port/reader_ffi_safety.rs`.
+- FFI `discard` is **iterative** (heap `Vec` frame stack) rather than C’s
+  recursive call stack, so hostile deep nesting cannot blow the Rust stack.
+  Observable results for well-formed / truncated inputs match C; only the
+  failure mode for extreme depth differs (completes or sticky decode error
+  instead of stack overflow).
+
+Frozen-link scaffolding: `tests/port/frozen-link/run.py` creates a repo-root
+`test` symlink to `tests/original/test` before running the everything suite so
+relative fixture paths (`test/messagepack/...`, `test/pseudojson/...`) resolve.
+Without that link, `test_compare_print` soft-continues on a missing expected
+file and then `memcmp`s a NULL pointer (SIGSEGV) once `print_data_to_file`
+writes a non-empty actual file.
+
+Deferred (Expect / buffer / fuller file parity):
+
+- Real `mpack_track_*` stack: `mpack_done_type` is intentionally a **no-op** so
+  tracking-enabled header inlines do not poison the reader. `remaining` /
+  `destroy` do not call `track_check_empty` / `track_destroy` yet.
+- Expect FFI still stubs; most behavioral weight for “reader” in the frozen
+  suite still lives under `test-expect.c`.
+- Full streaming buffer edge cases in `test-buffer.c` / `test-file.c` are not
+  claimed green by this slice.
 
 ### Safe-core API freeze (Node, minimal)
 
