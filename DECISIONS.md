@@ -79,6 +79,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Node C ABI under `full-suite-abi` | Real FFI in `src/ffi/node.rs` with side-table keyed by tree pointer | C owns `mpack_tree_t` / `mpack_node_t`; Rust graph + heap/pool ABI slots live off-struct (writer-builder pattern). Optional/contains/enum/dup-key/narrow/widen/utf8/copy/alloc/print/stream stay FFI-only. |
 | File init empty / oversize | Empty file → `invalid`; `max_bytes != 0` and size > max → `too_big` (no silent truncate) | Matches C `mpack_file_tree_read`. |
 | `tree.max_size` enforcement | Stream fill caps `owned_data` growth; do **not** reject `data_length > max_size` on parse of a preloaded buffer | C `max_size` is max **message** / fill accumulation, not whole multi-message buffer length. |
+| Stream incomplete sticky errors | After blocking fill + safe-core parse: remap core `Invalid`/`Eof` → `IO`, or `TOO_BIG` when fill hit `max_size` | C `reserve_fill` flags `too_big` when more bytes would exceed `max_size`; blocking `mpack_tree_parse` flags `io` when a `read_fn` still leaves the message incomplete (without a prior sticky error). Our one-shot parse flags `Invalid` first, so FFI remaps. |
 
 ## Technical decisions (hotspots)
 

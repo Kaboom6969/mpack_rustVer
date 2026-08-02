@@ -167,6 +167,33 @@ fn flag_tree_error(tree: *mut MpackTree, error: MpackError) {
     }
 }
 
+/// Replace a sticky error (stream incomplete remaps Invalid → IO / TOO_BIG).
+/// C leaves incomplete parses unflagged, then the outer `mpack_tree_parse`
+/// flags IO/invalid; our one-shot safe-core parse flags Invalid first.
+fn replace_tree_error(tree: *mut MpackTree, error: MpackError) {
+    if tree.is_null() || error == MPACK_OK {
+        return;
+    }
+    let t = unsafe { &mut *tree };
+    t.error = MPACK_OK;
+    flag_tree_error(tree, error);
+}
+
+/// Core Invalid/Eof from a fixed-buffer parse of stream-owned bytes means the
+/// message was incomplete after fills (C: `continue_parsing` returned false
+/// with `mpack_ok`). Remap to TOO_BIG when the fill hit `max_size`, else IO.
+fn remap_stream_incomplete(tree: *mut MpackTree, hit_max_size: bool) {
+    let err = tree_error(tree);
+    if err != MPACK_ERROR_INVALID && err != MPACK_ERROR_EOF {
+        return;
+    }
+    if hit_max_size {
+        replace_tree_error(tree, MPACK_ERROR_TOO_BIG);
+    } else {
+        replace_tree_error(tree, MPACK_ERROR_IO);
+    }
+}
+
 fn nil_node_for(tree: *mut MpackTree) -> MpackNode {
     if tree.is_null() {
         return MpackNode::null();
@@ -468,29 +495,45 @@ fn do_parse_inner(tree: *mut MpackTree, data: *const u8, data_length: usize) -> 
     true
 }
 
+/// Result of a streaming fill attempt.
+struct FillOutcome {
+    /// False if `read_fn` (or prior state) already flagged a tree error.
+    ok: bool,
+    /// True when `owned_data` reached `max_size` (C `reserve_fill` would refuse
+    /// further growth with `mpack_error_too_big` if more bytes are still needed).
+    hit_max_size: bool,
+}
+
 /// Streaming fill: read via `read_fn` into `owned_data`, capped by `max_size`
 /// (C `tree->max_size` — max bytes accumulated for the current message).
-/// Returns false if an error was flagged.
-fn fill_stream(tree: *mut MpackTree, blocking: bool) -> bool {
+fn fill_stream(tree: *mut MpackTree, blocking: bool) -> FillOutcome {
     let read_fn = unsafe { (*tree).read_fn };
     let Some(read_fn) = read_fn else {
-        return true;
+        return FillOutcome {
+            ok: true,
+            hit_max_size: false,
+        };
     };
     let max_size = with_state(tree, usize::MAX, |s| s.max_size);
     let mut chunk = vec![0u8; INITIAL_STREAM_CAPACITY];
+    let mut hit_max_size = false;
 
     loop {
         let current_len = with_state(tree, 0usize, |s| s.owned_data.len());
         if current_len >= max_size {
-            // Already at the message-size cap; further growth would be too_big
-            // in C's reserve_fill. Stop filling and let parse consume what we have.
+            // Cap reached. If the message is still incomplete after parse,
+            // `mpack_tree_parse` remaps Invalid → TOO_BIG (C `reserve_fill`).
+            hit_max_size = true;
             break;
         }
         let room = max_size - current_len;
         let want = room.min(chunk.len());
         let read = unsafe { read_fn(tree, chunk.as_mut_ptr().cast(), want) };
         if tree_error(tree) != MPACK_OK {
-            return false;
+            return FillOutcome {
+                ok: false,
+                hit_max_size,
+            };
         }
         if read == 0 || read == usize::MAX {
             break;
@@ -499,8 +542,8 @@ fn fill_stream(tree: *mut MpackTree, blocking: bool) -> bool {
         with_state(tree, (), |s| {
             s.owned_data.extend_from_slice(&chunk[..take]);
         });
-        // Cap reached: refuse to grow further (align with C too_big on oversize fill).
         if current_len + take >= max_size {
+            hit_max_size = true;
             break;
         }
         if !blocking {
@@ -515,7 +558,10 @@ fn fill_stream(tree: *mut MpackTree, blocking: bool) -> bool {
         t.data = s.owned_data.as_ptr().cast();
         t.data_length = s.owned_data.len();
     });
-    true
+    FillOutcome {
+        ok: true,
+        hit_max_size,
+    }
 }
 
 // ── default init helper ───────────────────────────────────────────────────────
@@ -861,19 +907,23 @@ pub unsafe extern "C" fn mpack_tree_parse(tree: *mut MpackTree) {
         }
         advance_previous_message(tree);
         let has_read_fn = unsafe { (*tree).read_fn }.is_some();
+        let mut hit_max_size = false;
         if has_read_fn {
-            if !fill_stream(tree, true) {
+            let fill = fill_stream(tree, true);
+            if !fill.ok {
                 return;
             }
+            hit_max_size = fill.hit_max_size;
         }
         let (data, data_length) = {
             let t = unsafe { &*tree };
             (t.data.cast::<u8>(), t.data_length)
         };
-        if !do_parse_inner(tree, data, data_length) && has_read_fn && tree_error(tree) == MPACK_OK
-        {
-            // Incomplete after fills already exhausted → I/O (blocking parse).
-            flag_tree_error(tree, MPACK_ERROR_IO);
+        if !do_parse_inner(tree, data, data_length) && has_read_fn {
+            // Safe-core flags Invalid/Eof for truncated buffers. With a read_fn,
+            // C's blocking parse maps incomplete → IO, or TOO_BIG when the fill
+            // already hit max_size (reserve_fill). Remap after the fact.
+            remap_stream_incomplete(tree, hit_max_size);
         }
     });
 }
@@ -893,24 +943,31 @@ pub unsafe extern "C" fn mpack_tree_try_parse(tree: *mut MpackTree) -> bool {
         }
         advance_previous_message(tree);
         let has_read_fn = unsafe { (*tree).read_fn }.is_some();
+        let mut hit_max_size = false;
         if has_read_fn {
             // Non-blocking: read one round of available data
-            if !fill_stream(tree, false) {
+            let fill = fill_stream(tree, false);
+            if !fill.ok {
                 return false;
             }
+            hit_max_size = fill.hit_max_size;
         }
         let (data, data_length) = {
             let t = unsafe { &*tree };
             (t.data.cast::<u8>(), t.data_length)
         };
 
-        // Attempt parse; if MPACK_ERROR_INVALID, it means incomplete data
-        // Save error state to restore on incomplete
+        // Attempt parse; Invalid/Eof may mean incomplete data (need another fill).
         let prev_error = tree_error(tree);
         let ok = do_parse_inner(tree, data, data_length);
         if !ok {
             let err = tree_error(tree);
             if err == MPACK_ERROR_INVALID || err == MPACK_ERROR_EOF {
+                if has_read_fn && hit_max_size {
+                    // Cap hit and still incomplete → TOO_BIG (C reserve_fill).
+                    replace_tree_error(tree, MPACK_ERROR_TOO_BIG);
+                    return false;
+                }
                 // Incomplete: reset error so caller can retry
                 unsafe { (*tree).error = prev_error };
                 return false;
