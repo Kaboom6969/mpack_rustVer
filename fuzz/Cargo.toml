@@ -32,6 +32,20 @@ test = false
 bench = false
 
 [[bin]]
+name = "writer_diff"
+path = "fuzz_targets/writer_diff.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "expect_diff"
+path = "fuzz_targets/expect_diff.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
 name = "total_diff"
 path = "fuzz_targets/total_diff.rs"
 doc = false

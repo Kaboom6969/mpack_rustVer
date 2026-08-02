@@ -45,3 +45,27 @@ See `fuzz/c_findings.md`. Summary:
   (does not exercise writer `(NULL, 0)`).
 
 All tiers above (differential): exit 0, no divergences / crash artifacts.
+
+## Full suite expansion (2026-08-02, later)
+
+Added `expect_diff`, `writer_diff`, `total_diff` (existing), and `fuzz_ffi/ffi_crash`,
+plus `python3 fuzz/run_all.py`.
+
+```text
+python3 fuzz/run_all.py --seconds 15
+  fuzz/reader_diff: ok
+  fuzz/node_diff: ok
+  fuzz/total_diff: ok
+  fuzz/expect_diff: ok
+  fuzz/writer_diff: ok
+  fuzz_ffi/ffi_crash: ok
+
+# Short smoke for new targets (not comparable duration to reader/node 60–300s rows above).
+expect_diff  -max_total_time=60 -max_len=65536: Done ~2.5M runs; 0 crashes (precise errors)
+writer_diff  -max_total_time=15 -max_len=65536: Done ~33k runs; 0 crashes
+ffi_crash    -max_total_time=20 (LSan on): Done ~803k runs; 0 crashes / 0 leaks
+```
+
+Fairness follow-up: expect sticky errors compared precisely (no collapse);
+`r#str` type-byte + `str_match` byte-at-a-time aligned with C; `ffi_crash` LSan
+enabled under real fuzzing `test_free`; expect corpus expanded (float/utf8/ext/…).

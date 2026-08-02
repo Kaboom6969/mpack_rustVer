@@ -157,19 +157,21 @@ pub fn double_strict(reader: &mut Reader<'_>) -> Option<f64> {
 
 pub fn float_range(reader: &mut Reader<'_>, min_value: f32, max_value: f32) -> Option<f32> {
     let value = float(reader)?;
-    if value >= min_value && value <= max_value {
-        Some(value)
-    } else {
+    // Match C: reject with `val < min || val > max` (NaN comparisons are false,
+    // so NaN bounds do not reject — same as mpack_expect_float_range).
+    if value < min_value || value > max_value {
         type_error(reader)
+    } else {
+        Some(value)
     }
 }
 
 pub fn double_range(reader: &mut Reader<'_>, min_value: f64, max_value: f64) -> Option<f64> {
     let value = double(reader)?;
-    if value >= min_value && value <= max_value {
-        Some(value)
-    } else {
+    if value < min_value || value > max_value {
         type_error(reader)
+    } else {
+        Some(value)
     }
 }
 
@@ -190,18 +192,19 @@ pub fn int_match(reader: &mut Reader<'_>, value: i64) -> bool {
 }
 
 pub fn nil(reader: &mut Reader<'_>) -> bool {
-    match reader.read_tag() {
-        Some(Tag::Nil) => true,
+    match reader.read_native_u8() {
+        Some(0xc0) => true,
         Some(_) => fail_bool(reader),
         None => false,
     }
 }
 
 pub fn r#bool(reader: &mut Reader<'_>) -> Option<bool> {
-    match reader.read_tag()? {
-        Tag::Bool(value) => Some(value),
-        _ => type_error(reader),
+    let type_byte = reader.read_native_u8()?;
+    if type_byte & !1 != 0xc2 {
+        return type_error(reader);
     }
+    Some(type_byte & 1 != 0)
 }
 
 pub fn true_(reader: &mut Reader<'_>) -> bool {
@@ -342,10 +345,22 @@ pub fn array_max_or_nil(reader: &mut Reader<'_>, max_count: u32) -> Option<Expec
 }
 
 pub fn r#str(reader: &mut Reader<'_>) -> Option<u32> {
-    match reader.read_tag()? {
-        Tag::Str(length) => Some(length),
-        _ => type_error(reader),
-    }
+    // Match C `mpack_expect_str` when `!MPACK_OPTIMIZE_FOR_SIZE`: type-byte path
+    // so a truncated non-str marker (e.g. int32 `0xd2` with 2 leftover bytes)
+    // sticky-errors as `Type`, not `Invalid` from a full `read_tag`.
+    let type_byte = reader.read_native_u8()?;
+    let count = if type_byte >> 5 == 5 {
+        u32::from(type_byte & !0xe0)
+    } else if type_byte == 0xd9 {
+        u32::from(reader.read_native_u8()?)
+    } else if type_byte == 0xda {
+        u32::from(reader.read_native_u16()?)
+    } else if type_byte == 0xdb {
+        reader.read_native_u32()?
+    } else {
+        return type_error(reader);
+    };
+    Some(count)
 }
 
 fn copy_bytes(dst: &mut [u8], src: &[u8]) -> Option<usize> {
@@ -395,11 +410,17 @@ pub fn str_match(reader: &mut Reader<'_>, expected: &[u8]) -> bool {
     if length as usize != expected.len() {
         return fail_bool(reader);
     }
-    match reader.read_bytes(expected.len()) {
-        Some(bytes) if bytes == expected => true,
-        Some(_) => fail_bool(reader),
-        None => false,
+    // Match C `mpack_expect_str_match`: compare one native byte at a time so a
+    // mismatch sticky-errors as `Type` before a truncated payload becomes
+    // `Invalid` from a bulk `read_bytes`.
+    for &want in expected {
+        match reader.read_native_u8() {
+            Some(got) if got == want => {}
+            Some(_) => return fail_bool(reader),
+            None => return false,
+        }
     }
+    true
 }
 
 pub fn cstr(reader: &mut Reader<'_>, buf: &mut [u8]) -> bool {
@@ -511,6 +532,15 @@ pub fn tag(reader: &mut Reader<'_>, expected: Tag) -> bool {
 }
 
 fn tags_equal(left: Tag, right: Tag) -> bool {
+    // Match C `mpack_tag_cmp`: non-negative ints compare as uint.
+    let normalize = |tag: Tag| -> Tag {
+        match tag {
+            Tag::Int(value) if value >= 0 => Tag::Uint(value as u64),
+            other => other,
+        }
+    };
+    let left = normalize(left);
+    let right = normalize(right);
     match (left, right) {
         (Tag::Nil, Tag::Nil) => true,
         (Tag::Bool(a), Tag::Bool(b)) => a == b,

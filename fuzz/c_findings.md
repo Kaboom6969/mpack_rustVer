@@ -170,3 +170,28 @@ Safe core takes `&[u8]` and cannot express a null pointer.
   `0 failures`; output is empty fixstr `0xa0`.
 - **Practical risk**: low on common libcs (often a no-op for `n==0`), but still
   non-portable / invalid C; sanitizer builds correctly flag it. Not RCE.
+
+## Finding: `mpack_expect_str_match` high bytes vs signed `char`
+
+### Discovery path
+
+Differential `expect_diff` (precise sticky errors) with expected byte `0xa1`
+and matching fixstr payload: C sticky `Type`, Rust ok.
+
+### Root cause
+
+Upstream C (`mpack-expect.c`):
+
+```c
+if (mpack_expect_native_u8(reader) != *str++) {
+    mpack_reader_flag_error(reader, mpack_error_type);
+```
+
+`native_u8` is `uint8_t`; `*str` is `char`. On signed-char hosts (Linux gcc
+default), byte `0xa1` promotes to `-95` and does not equal `161`.
+
+### Port / fuzz stance
+
+Safe-core `expect::str_match` compares `&[u8]` (correct). Fuzz harness masks
+`str_match` expected bytes to 7-bit ASCII on both sides so digests stay fair.
+Frozen suite only exercises ASCII `cstr_match`.

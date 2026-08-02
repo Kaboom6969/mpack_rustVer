@@ -193,6 +193,11 @@ mod suite_shims {
     use std::alloc::{alloc_zeroed, Layout};
     use std::ffi::CStr;
 
+    extern "C" {
+        fn calloc(nmemb: usize, size: usize) -> *mut c_void;
+        fn free(ptr: *mut c_void);
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn mpack_break_hit(_message: *const c_char) {}
 
@@ -201,13 +206,28 @@ mod suite_shims {
 
     #[no_mangle]
     pub unsafe extern "C" fn test_malloc(size: usize) -> *mut c_void {
-        let layout = Layout::from_size_align(size.max(1), 8).unwrap();
-        unsafe { alloc_zeroed(layout) }.cast()
+        let size = size.max(1);
+        // Under cargo-fuzz (`--cfg fuzzing`), pair with a real `test_free` so
+        // track/file buffers do not grow without bound across iterations.
+        // Cargo tests keep the historical noop-free shim (suite counter tests
+        // live under frozen-link with real suite allocators).
+        if cfg!(fuzzing) {
+            unsafe { calloc(1, size) }
+        } else {
+            let layout = Layout::from_size_align(size, 8).unwrap();
+            unsafe { alloc_zeroed(layout) }.cast()
+        }
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn test_free(pointer: *mut c_void) {
-        let _ = pointer;
+        if cfg!(fuzzing) {
+            if !pointer.is_null() {
+                unsafe { free(pointer) };
+            }
+        } else {
+            let _ = pointer;
+        }
     }
 
     #[no_mangle]

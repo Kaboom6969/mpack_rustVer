@@ -296,6 +296,43 @@ impl<'data> Reader<'data> {
         true
     }
 
+    /// Reads one raw byte (C `mpack_expect_native_u8` / type-byte expects).
+    ///
+    /// Used by expect `nil`/`bool`/`str` paths that match C's type-byte checks
+    /// instead of a full `read_tag` (so truncated multi-byte markers flag `Type`,
+    /// not `Invalid`, when the type byte itself is not a string).
+    pub(crate) fn read_native_u8(&mut self) -> Option<u8> {
+        if self.error != Error::Ok {
+            return None;
+        }
+        if !self.require(1) {
+            return None;
+        }
+        Some(self.take_u8())
+    }
+
+    /// Reads a big-endian `u16` (C `mpack_expect_native_u16`).
+    pub(crate) fn read_native_u16(&mut self) -> Option<u16> {
+        if self.error != Error::Ok {
+            return None;
+        }
+        if !self.require(2) {
+            return None;
+        }
+        Some(self.take_u16())
+    }
+
+    /// Reads a big-endian `u32` (C `mpack_expect_native_u32`).
+    pub(crate) fn read_native_u32(&mut self) -> Option<u32> {
+        if self.error != Error::Ok {
+            return None;
+        }
+        if !self.require(4) {
+            return None;
+        }
+        Some(self.take_u32())
+    }
+
     fn parse_tag(&mut self, consume: bool) -> Option<Tag> {
         if self.error != Error::Ok {
             return None;

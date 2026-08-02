@@ -28,7 +28,7 @@ ffi-harness = ["dep:cc", "ffi"]
 full-suite-abi = ["ffi"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mpack_frozen_link)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mpack_frozen_link)', 'cfg(fuzzing)'] }
 
 [dependencies]
 

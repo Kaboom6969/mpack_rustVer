@@ -1,7 +1,7 @@
 /*
  * Oracle config for differential fuzz (included as mpack-config.h via
- * MPACK_HAS_CONFIG). Enables reader+node+stdlib+extensions; disables writer,
- * expect, stdio, and debug asserts so the fuzzer stays lean and non-fatal.
+ * MPACK_HAS_CONFIG). Enables reader/node/writer/expect + stdlib/extensions;
+ * disables stdio and debug asserts so the fuzzer stays lean and non-fatal.
  */
 
 #ifndef MPACK_CONFIG_H
@@ -9,8 +9,8 @@
 
 #define MPACK_READER 1
 #define MPACK_NODE 1
-#define MPACK_WRITER 0
-#define MPACK_EXPECT 0
+#define MPACK_WRITER 1
+#define MPACK_EXPECT 1
 #define MPACK_STDLIB 1
 #define MPACK_STDIO 0
 #define MPACK_EXTENSIONS 1

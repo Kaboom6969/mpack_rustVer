@@ -12,9 +12,13 @@ fn main() {
         mpack_dir.join("mpack-common.c"),
         mpack_dir.join("mpack-platform.c"),
         mpack_dir.join("mpack-reader.c"),
+        mpack_dir.join("mpack-writer.c"),
+        mpack_dir.join("mpack-expect.c"),
         mpack_dir.join("mpack-node.c"),
         oracle_c.join("oracle_reader.c"),
         oracle_c.join("oracle_node.c"),
+        oracle_c.join("oracle_writer.c"),
+        oracle_c.join("oracle_expect.c"),
     ];
 
     for source in &sources {
