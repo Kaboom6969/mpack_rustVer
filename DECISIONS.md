@@ -146,6 +146,15 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
 | Evidence | Optional `fuzz/log.txt` after timed clean runs | Documents smoke; not a substitute for frozen-suite module gates. |
 
+## Upstream C findings (suite / fuzz only)
+
+Discovered empirically via original C sanitizer suite (not by reading C TODOs).
+Full run log: `fuzz/c_findings.md`.
+
+| Finding | Evidence | Rust port |
+| --- | --- | --- |
+| `mpack_write_str(writer, NULL, 0)` (and the UTF-8 sibling API exercised by the same test) is C undefined behavior: fixstr fast path calls `mpack_memcpy(..., data, count)` with a null source when `count == 0` (`mpack-writer.c:1266`). Unit test `test_write_utf8` expects `NOERROR`. | `run-sanitize-undefined-debug` UBSan: `null pointer passed as argument 2, which is declared to never be null`; stack through `test-write.c:1022`. ASan unit + AFL++ `fuzz.c` (600s) found no memory crashes. | Already hardened: `write_c_bytes` maps null+zero to `&[]` and only flags `bug` when `data` is null with nonzero `count` (`src/ffi/writer.rs`). |
+
 ## Explicit non-goals (for now)
 
 - Replacing the frozen C suite with `tests/port/` as the sole correctness proof for a claimed module.

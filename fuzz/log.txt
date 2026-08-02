@@ -23,4 +23,22 @@ reader_diff: Done 1972846 runs in 61s; cov=271 ft=1496 corp=435/57Kb; 0 crashes
 node_diff:   Done 952060 runs in 61s; cov=416 ft=2317 corp=589/115Kb; 0 crashes
 ```
 
-All tiers: exit 0, no divergences / crash artifacts.
+## 300 seconds (C-bug-hunt follow-up, `-max_total_time=300 -max_len=65536`)
+
+```text
+reader_diff: Done 9074480 runs in 301s; 0 crashes; exit 0
+node_diff:   Done 1963181 runs in 301s; 0 crashes; exit 0
+```
+
+No C-oracle aborts / digest panics in these windows.
+
+## Upstream C-only hunt (same day)
+
+See `fuzz/c_findings.md`. Summary:
+
+- C unit `everything-debug` / `sanitize-address-debug`: 0 failures.
+- C unit `sanitize-undefined-debug`: harness 0 failures, **1 UBSan** at
+  `mpack_write_str(NULL, 0)` → `memcpy` null source (`mpack-writer.c:1266`).
+- AFL++ ASan on `test/fuzz/fuzz.c`, `-V 600`: 797168 execs, 0 crashes / 0 hangs.
+
+All tiers above (differential): exit 0, no divergences / crash artifacts.
