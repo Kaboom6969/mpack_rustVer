@@ -1,13 +1,26 @@
-# Differential fuzz smoke (2026-08-02)
+# Differential fuzz runs (2026-08-02)
 
-Environment: Linux x86_64, nightly rustc, cargo-fuzz, original C oracle linked in-process.
+Environment: Linux x86_64, nightly rustc, cargo-fuzz, in-process C oracle.
+
+## Smoke (corpus only, `-runs=0`)
 
 ```text
-cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_total_time=15
-→ Done 800658 runs in 16 second(s); 0 divergences / crashes
-
-cargo +nightly fuzz run node_diff --fuzz-dir fuzz -- -max_total_time=15
-→ Done 506007 runs in 16 second(s); 0 divergences / crashes
+reader_diff: Done 19 runs in 0s; cov=161 ft=230 corp=18/49b; 0 crashes
+node_diff:   Done 19 runs in 0s; cov=250 ft=371 corp=18/49b; 0 crashes
 ```
 
-Corpus seeds under `corpus/{reader_diff,node_diff}/` also pass with `-runs=0`.
+## 10 seconds (`-max_total_time=10`)
+
+```text
+reader_diff: Done 609194 runs in 11s; cov=271 ft=1404 corp=442/33Kb; 0 crashes
+node_diff:   Done 400480 runs in 11s; cov=411 ft=2118 corp=550/37Kb; 0 crashes
+```
+
+## 60 seconds (`-max_total_time=60`)
+
+```text
+reader_diff: Done 1972846 runs in 61s; cov=271 ft=1496 corp=435/57Kb; 0 crashes
+node_diff:   Done 952060 runs in 61s; cov=416 ft=2317 corp=589/115Kb; 0 crashes
+```
+
+All tiers: exit 0, no divergences / crash artifacts.
