@@ -240,13 +240,24 @@ def main() -> int:
             cargo_command.extend(["--target", RUST_TARGET])
         if args.release:
             cargo_command.append("--release")
-        cargo_command.extend(["--features", "full-suite-abi", "--crate-type", "staticlib"])
+        cargo_command.extend(
+            [
+                "--features",
+                "full-suite-abi",
+                "--crate-type",
+                "staticlib",
+                "--",
+                "--cfg",
+                "mpack_frozen_link",
+            ]
+        )
     else:
-        cargo_command = ["cargo", "build"]
+        cargo_command = ["cargo", "rustc"]
         if RUST_TARGET:
             cargo_command.extend(["--target", RUST_TARGET])
         if args.release:
             cargo_command.append("--release")
+        cargo_command.extend(["--crate-type", "cdylib"])
     run(cargo_command)
     BUILD.mkdir(parents=True, exist_ok=True)
     output = rust_output(args.release)

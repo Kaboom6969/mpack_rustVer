@@ -2,6 +2,7 @@
 
 mod common;
 mod guard;
+pub(crate) mod suite_libc;
 pub mod types;
 pub mod writer;
 

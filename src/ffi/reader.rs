@@ -11,6 +11,10 @@ use std::slice;
 
 use crate::common::{Tag, Timestamp};
 use crate::ffi::guard::catch_ffi_panic;
+use crate::ffi::suite_libc::{
+    suite_fclose, suite_ferror, suite_fopen, suite_fread, suite_free, suite_fseek, suite_ftell,
+    suite_fwrite, suite_malloc, OWNED_BUFFER_CAPACITY,
+};
 use crate::ffi::types::{
     core_error_to_abi, MpackError, MpackReader, MpackReaderFill, MpackReaderSkip, MpackTag,
     MpackTimestamp, MpackTrack, MPACK_ERROR_BUG, MPACK_ERROR_EOF, MPACK_ERROR_INVALID,
@@ -18,7 +22,6 @@ use crate::ffi::types::{
 };
 use crate::reader::{self, Reader};
 
-const OWNED_BUFFER_CAPACITY: usize = 4096;
 const READER_MINIMUM_BUFFER_SIZE: usize = 32;
 const MAXIMUM_TAG_SIZE: usize = 9;
 const PRINT_BYTE_COUNT: usize = 12;
@@ -35,20 +38,11 @@ const TYPE_MAP: c_int = 10;
 const TYPE_EXT: c_int = 11;
 
 unsafe extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-    fn free(pointer: *mut c_void);
+    fn feof(file: *mut c_void) -> c_int;
     /// Frozen-suite allocator (`MPACK_MALLOC` → `test_malloc`).
     fn test_malloc(size: usize) -> *mut c_void;
     /// Frozen-suite free (`MPACK_FREE` → `test_free`).
     fn test_free(pointer: *mut c_void);
-    fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
-    fn fread(data: *mut c_void, size: usize, count: usize, file: *mut c_void) -> usize;
-    fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
-    fn fclose(file: *mut c_void) -> c_int;
-    fn feof(file: *mut c_void) -> c_int;
-    fn fseek(file: *mut c_void, offset: i64, whence: c_int) -> c_int;
-    fn ftell(file: *mut c_void) -> i64;
-    fn ferror(file: *mut c_void) -> c_int;
 }
 
 const SEEK_CUR: c_int = 1;
@@ -556,11 +550,11 @@ pub(crate) fn done_type_impl(reader: *mut MpackReader, type_: c_int) {
 }
 
 fn init_stdfile_impl(reader: *mut MpackReader, file: *mut c_void, close_when_done: bool) {
-    let buffer = unsafe { malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
+    let buffer = unsafe { suite_malloc(OWNED_BUFFER_CAPACITY).cast::<c_char>() };
     if buffer.is_null() {
         if close_when_done {
             unsafe {
-                fclose(file);
+                suite_fclose(file);
             }
         }
         unsafe {
@@ -599,7 +593,7 @@ unsafe extern "C" fn file_reader_fill(reader: *mut MpackReader, buffer: *mut c_c
         flag_error_impl(reader, MPACK_ERROR_EOF);
         return 0;
     }
-    unsafe { fread(buffer.cast(), 1, count, context.file) }
+    unsafe { suite_fread(buffer.cast(), 1, count, context.file) }
 }
 
 unsafe extern "C" fn file_reader_skip(reader: *mut MpackReader, count: usize) {
@@ -609,11 +603,11 @@ unsafe extern "C" fn file_reader_skip(reader: *mut MpackReader, count: usize) {
     }
     let state = unsafe { borrow_reader(reader) };
     let context = unsafe { &*state.context.cast::<FileContext>() };
-    if unsafe { ftell(context.file) } >= 0 {
-        if unsafe { fseek(context.file, count as i64, SEEK_CUR) } == 0 {
+    if unsafe { suite_ftell(context.file) } >= 0 {
+        if unsafe { suite_fseek(context.file, count as std::ffi::c_long, SEEK_CUR) } == 0 {
             return;
         }
-        if unsafe { ferror(context.file) } != 0 {
+        if unsafe { suite_ferror(context.file) } != 0 {
             flag_error_impl(reader, MPACK_ERROR_IO);
             return;
         }
@@ -625,7 +619,7 @@ unsafe extern "C" fn file_reader_teardown(reader: *mut MpackReader) {
     // SAFETY: Teardown is only invoked on a live non-null reader.
     let state = unsafe { borrow_reader(reader) };
     if !state.buffer.is_null() {
-        unsafe { free(state.buffer.cast()) };
+        unsafe { suite_free(state.buffer.cast()) };
     }
     if !state.context.is_null() {
         unsafe {
@@ -645,7 +639,7 @@ unsafe extern "C" fn file_reader_teardown_close(reader: *mut MpackReader) {
     let state = unsafe { borrow_reader(reader) };
     let context = unsafe { &*state.context.cast::<FileContext>() };
     let file = context.file;
-    let close_result = unsafe { fclose(file) };
+    let close_result = unsafe { suite_fclose(file) };
     unsafe { file_reader_teardown(reader) };
     if close_result != 0 {
         flag_error_impl(reader, MPACK_ERROR_IO);
@@ -772,7 +766,7 @@ pub unsafe extern "C" fn mpack_reader_init_filename(reader: *mut MpackReader, fi
             }
             return;
         }
-        let file = unsafe { fopen(filename, c"rb".as_ptr()) };
+        let file = unsafe { suite_fopen(filename, c"rb".as_ptr()) };
         if file.is_null() {
             unsafe {
                 reader.write(MpackReader::error_state(MPACK_ERROR_IO));
@@ -1768,7 +1762,7 @@ pub unsafe extern "C" fn mpack_print_data_to_file(
         }
         output.push(b'\n');
         unsafe {
-            fwrite(output.as_ptr().cast(), 1, output.len(), file);
+            suite_fwrite(output.as_ptr().cast(), 1, output.len(), file);
         }
     });
 }

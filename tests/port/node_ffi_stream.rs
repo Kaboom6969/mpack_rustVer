@@ -14,23 +14,6 @@ use mpack::ffi::types::{
     MpackTree, MPACK_ERROR_IO, MPACK_ERROR_TOO_BIG, MPACK_OK,
 };
 
-#[no_mangle]
-pub unsafe extern "C" fn mpack_break_hit(_message: *const i8) {}
-
-#[no_mangle]
-pub unsafe extern "C" fn mpack_assert_fail(_message: *const i8) {}
-
-#[no_mangle]
-pub unsafe extern "C" fn test_malloc(size: usize) -> *mut std::ffi::c_void {
-    let layout = std::alloc::Layout::from_size_align(size.max(1), 8).unwrap();
-    unsafe { std::alloc::alloc_zeroed(layout) }.cast()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn test_free(pointer: *mut std::ffi::c_void) {
-    let _ = pointer;
-}
-
 unsafe extern "C" {
     fn mpack_tree_init_stream(
         tree: *mut MpackTree,

@@ -9,7 +9,9 @@ readme = "README.md"
 
 [lib]
 name = "mpack"
-crate-type = ["rlib", "cdylib"]
+# rlib for cargo test (suite symbols stay unresolved until the test binary links).
+# Frozen-link requests cdylib/staticlib via `cargo rustc --crate-type …`.
+crate-type = ["rlib"]
 
 [features]
 default = []
@@ -19,7 +21,11 @@ ffi-harness = ["dep:cc"]
 # Used by frozen-link --everything (C everything) and --default-config.
 # Frozen-link builds this feature as `cargo rustc --crate-type staticlib` so
 # suite symbols (test_malloc / mpack_assert_fail) resolve at final executable link.
+# Pass `--cfg mpack_frozen_link` so Rust does not emit cargo-test suite shims.
 full-suite-abi = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mpack_frozen_link)'] }
 
 [dependencies]
 

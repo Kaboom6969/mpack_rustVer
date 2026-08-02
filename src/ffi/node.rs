@@ -13,7 +13,7 @@
 //! past the exttype byte, matching this convention.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
+use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
 use std::io::Write as IoWrite;
 use std::ptr;
 use std::slice;
@@ -21,6 +21,9 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::common::Tag;
 use crate::ffi::guard::catch_ffi_panic;
+use crate::ffi::suite_libc::{
+    suite_fclose, suite_fopen, suite_fread, suite_fseek, suite_ftell, suite_fwrite,
+};
 use crate::ffi::types::{
     core_error_to_abi, MpackError, MpackNode, MpackNodeData, MpackTag, MpackTimestamp, MpackTree,
     MpackTreeParser, MpackTreeRead, MPACK_ERROR_BUG, MPACK_ERROR_DATA, MPACK_ERROR_EOF,
@@ -49,6 +52,8 @@ const PRINT_BYTE_COUNT: usize = 12;
 const INITIAL_STREAM_CAPACITY: usize = 4096;
 const SEEK_SET: c_int = 0;
 const SEEK_END: c_int = 2;
+/// C `<limits.h>` `LONG_MAX` (ftell-based file size gate).
+const LONG_MAX: usize = c_long::MAX as usize;
 
 // ── externs ───────────────────────────────────────────────────────────────────
 
@@ -57,12 +62,6 @@ unsafe extern "C" {
     fn test_free(pointer: *mut c_void);
     fn mpack_assert_fail(message: *const c_char);
     fn mpack_break_hit(message: *const c_char);
-    fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
-    fn fread(data: *mut c_void, size: usize, count: usize, file: *mut c_void) -> usize;
-    fn fclose(file: *mut c_void) -> c_int;
-    fn ftell(file: *mut c_void) -> i64;
-    fn fseek(file: *mut c_void, offset: i64, whence: c_int) -> c_int;
-    fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
 }
 
 // ── side-table state ──────────────────────────────────────────────────────────
@@ -128,6 +127,17 @@ fn break_hit(msg: &[u8]) {
 
 fn assert_fail(msg: &[u8]) {
     unsafe { mpack_assert_fail(msg.as_ptr().cast()) };
+}
+
+/// C `mpack_tree_file_check_max_bytes`: stdio `long` cannot express larger limits.
+fn tree_file_check_max_bytes(tree: *mut MpackTree, max_bytes: usize) -> bool {
+    if max_bytes > LONG_MAX {
+        break_hit(b"max_bytes is invalid, maximum is LONG_MAX\0");
+        init_tree_clear(tree);
+        flag_tree_error(tree, MPACK_ERROR_BUG);
+        return false;
+    }
+    true
 }
 
 /// Revoke all ABI parse views before dropping or replacing their side-table
@@ -757,8 +767,11 @@ pub unsafe extern "C" fn mpack_tree_init_filename(
             flag_tree_error(tree, MPACK_ERROR_BUG);
             return;
         }
+        if !tree_file_check_max_bytes(tree, max_bytes) {
+            return;
+        }
         // SAFETY: filename is a NUL-terminated C string per the C contract
-        let file = unsafe { fopen(filename, c"rb".as_ptr()) };
+        let file = unsafe { suite_fopen(filename, c"rb".as_ptr()) };
         if file.is_null() {
             init_tree_clear(tree);
             flag_tree_error(tree, MPACK_ERROR_IO);
@@ -783,8 +796,8 @@ pub unsafe extern "C" fn mpack_tree_init_filename(
                 flag_tree_error(tree, err);
             }
         }
-        // SAFETY: file was opened with fopen; we close after reading
-        unsafe { fclose(file) };
+        // SAFETY: file was opened with suite_fopen; we close after reading
+        unsafe { suite_fclose(file) };
     })
     .is_err()
     {
@@ -813,6 +826,12 @@ pub unsafe extern "C" fn mpack_tree_init_stdfile(
             flag_tree_error(tree, MPACK_ERROR_BUG);
             return;
         }
+        if !tree_file_check_max_bytes(tree, max_bytes) {
+            if close_when_done {
+                unsafe { suite_fclose(stdfile) };
+            }
+            return;
+        }
         init_tree_clear(tree);
         match load_file_data(stdfile, max_bytes) {
             Ok(data) => {
@@ -829,14 +848,14 @@ pub unsafe extern "C" fn mpack_tree_init_stdfile(
                 if !stored {
                     clear_abi_parse_views(tree);
                     if close_when_done {
-                        unsafe { fclose(stdfile) };
+                        unsafe { suite_fclose(stdfile) };
                     }
                     flag_tree_error(tree, MPACK_ERROR_BUG);
                 }
             }
             Err(err) => {
                 if close_when_done {
-                    unsafe { fclose(stdfile) };
+                    unsafe { suite_fclose(stdfile) };
                 }
                 flag_tree_error(tree, err);
             }
@@ -902,11 +921,11 @@ pub unsafe extern "C" fn mpack_tree_set_limits(
 
 fn load_file_data(file: *mut c_void, max_bytes: usize) -> Result<Vec<u8>, MpackError> {
     // Align with C `mpack_file_tree_read` (mpack-node.c).
-    if unsafe { fseek(file, 0, SEEK_END) } != 0 {
+    if unsafe { suite_fseek(file, 0, SEEK_END) } != 0 {
         return Err(MPACK_ERROR_IO);
     }
-    let file_size_raw = unsafe { ftell(file) };
-    if unsafe { fseek(file, 0, SEEK_SET) } != 0 {
+    let file_size_raw = unsafe { suite_ftell(file) } as i64;
+    if unsafe { suite_fseek(file, 0, SEEK_SET) } != 0 {
         return Err(MPACK_ERROR_IO);
     }
     let file_size = match crate::node::check_file_tree_bytes(file_size_raw, max_bytes) {
@@ -916,7 +935,7 @@ fn load_file_data(file: *mut c_void, max_bytes: usize) -> Result<Vec<u8>, MpackE
         Err(_) => return Err(MPACK_ERROR_IO),
     };
     let mut buf = vec![0u8; file_size];
-    let read = unsafe { fread(buf.as_mut_ptr().cast(), 1, file_size, file) };
+    let read = unsafe { suite_fread(buf.as_mut_ptr().cast(), 1, file_size, file) };
     if read != file_size {
         return Err(MPACK_ERROR_IO);
     }
@@ -1079,7 +1098,7 @@ pub unsafe extern "C" fn mpack_tree_destroy(tree: *mut MpackTree) -> MpackError 
         let state = remove_state(tree);
         if let Some(s) = state {
             if let Some(file) = s.close_file {
-                unsafe { fclose(file) };
+                unsafe { suite_fclose(file) };
             }
         }
 
@@ -3023,12 +3042,17 @@ pub unsafe extern "C" fn mpack_node_print_to_file(node: MpackNode, file: *mut c_
         if node.tree.is_null() || node.data.is_null() || node_tree_error(node) != MPACK_OK {
             let _ = write!(output, "<mpack node error>");
         } else {
+            // C `mpack_node_print_to_file` starts at depth 2 with leading indent.
+            const DEPTH: usize = 2;
+            for _ in 0..DEPTH {
+                let _ = write!(output, "    ");
+            }
             let tree_data = tree_data_ptr(node);
-            print_node_to_vec(node.data, tree_data, &mut output, 0);
+            print_node_to_vec(node.data, tree_data, &mut output, DEPTH);
         }
         output.push(b'\n');
         if !output.is_empty() {
-            unsafe { fwrite(output.as_ptr().cast(), 1, output.len(), file) };
+            unsafe { suite_fwrite(output.as_ptr().cast(), 1, output.len(), file) };
         }
     });
 }

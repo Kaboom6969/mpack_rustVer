@@ -1,15 +1,14 @@
 //! Read/write track stack matching C `mpack-common` tracking.
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use crate::ffi::suite_libc::{suite_free, suite_malloc, suite_realloc, TRACKING_INITIAL_CAPACITY};
 use crate::ffi::types::{
     MpackError, MpackTrack, MpackTrackElement, MPACK_ERROR_BUG, MPACK_ERROR_MEMORY, MPACK_OK,
 };
-
-const TRACKING_INITIAL_CAPACITY: usize = 8;
 
 /// When set, the next `track_init` returns `mpack_error_memory` without allocating.
 /// Consumed (cleared) on use. Port / unit tests only.
@@ -54,9 +53,6 @@ const TYPE_MAP: c_int = 10;
 const TYPE_EXT: c_int = 11;
 
 unsafe extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-    fn realloc(pointer: *mut c_void, size: usize) -> *mut c_void;
-    fn free(pointer: *mut c_void);
     /// Provided by the frozen suite under `MPACK_CUSTOM_ASSERT` / debug builds.
     fn mpack_break_hit(message: *const c_char);
 }
@@ -79,8 +75,8 @@ pub(crate) fn track_init(track: &mut MpackTrack) -> MpackError {
     }
     track.capacity = TRACKING_INITIAL_CAPACITY;
     let bytes = TRACKING_INITIAL_CAPACITY.saturating_mul(std::mem::size_of::<MpackTrackElement>());
-    // SAFETY: libc malloc returns aligned storage or null.
-    let elements = unsafe { malloc(bytes.max(1)) }.cast::<MpackTrackElement>();
+    // SAFETY: Suite/ABI malloc returns aligned storage or null.
+    let elements = unsafe { suite_malloc(bytes.max(1)) }.cast::<MpackTrackElement>();
     if elements.is_null() {
         track.capacity = 0;
         track.elements = ptr::null_mut();
@@ -91,11 +87,14 @@ pub(crate) fn track_init(track: &mut MpackTrack) -> MpackError {
 }
 
 fn track_grow(track: &mut MpackTrack) -> MpackError {
+    let old_capacity = track.capacity;
     let new_capacity = track.capacity.saturating_mul(2).max(TRACKING_INITIAL_CAPACITY);
+    let old_bytes = old_capacity.saturating_mul(std::mem::size_of::<MpackTrackElement>());
     let new_bytes = new_capacity.saturating_mul(std::mem::size_of::<MpackTrackElement>());
-    // SAFETY: `elements` came from malloc/realloc; size is the new capacity.
-    let new_elements =
-        unsafe { realloc(track.elements.cast(), new_bytes.max(1)) }.cast::<MpackTrackElement>();
+    // SAFETY: `elements` came from suite_malloc/suite_realloc; used prefix is old_bytes.
+    let new_elements = unsafe {
+        suite_realloc(track.elements.cast(), old_bytes, new_bytes.max(1)).cast::<MpackTrackElement>()
+    };
     if new_elements.is_null() {
         return MPACK_ERROR_MEMORY;
     }
@@ -283,8 +282,8 @@ pub(crate) fn track_destroy(track: &mut MpackTrack, cancel: bool) -> MpackError 
         track_check_empty(track)
     };
     if !track.elements.is_null() {
-        // SAFETY: elements came from malloc/realloc in this module.
-        unsafe { free(track.elements.cast()) };
+        // SAFETY: elements came from suite_malloc/suite_realloc in this module.
+        unsafe { suite_free(track.elements.cast()) };
         track.elements = ptr::null_mut();
     }
     track.count = 0;
