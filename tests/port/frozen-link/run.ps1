@@ -3,13 +3,14 @@ param(
     [switch]$ExpectMissing,
     [switch]$Everything,
     [switch]$DefaultConfig,
+    [switch]$SoftContinue,
     [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
 
-if ($ExpectMissing -and -not $Full) {
-    throw "-ExpectMissing requires -Full."
+if ($ExpectMissing) {
+    throw "-ExpectMissing is removed: an incomplete link must fail. Unresolved symbols are not a successful checkpoint."
 }
 if ($Everything -and $DefaultConfig) {
     throw "Use only one of -Everything / -DefaultConfig."
@@ -17,6 +18,9 @@ if ($Everything -and $DefaultConfig) {
 $FullSuite = $Everything -or $DefaultConfig
 if ($FullSuite -and -not $Full) {
     throw "-Everything / -DefaultConfig requires -Full."
+}
+if ($SoftContinue -and -not $FullSuite) {
+    throw "-SoftContinue requires -Full -Everything (or -DefaultConfig)."
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -124,8 +128,10 @@ $Sources += Join-Path $Root "original_c\mpack-develop\src\mpack\mpack-platform.c
 
 if ($FullSuite) {
     $Sources += Join-Path $PSScriptRoot "c\full_layout_check.c"
-    $Sources += Join-Path $PSScriptRoot "c\soft_abort.c"
-    $Sources += Join-Path $PSScriptRoot "c\quiet_printf.c"
+    if ($SoftContinue) {
+        $Sources += Join-Path $PSScriptRoot "c\soft_abort.c"
+        $Sources += Join-Path $PSScriptRoot "c\quiet_printf.c"
+    }
     $Ctor = Join-Path $Build "full_layout_ctor.c"
     @"
 int mpack_full_layout_check(void);
@@ -163,7 +169,8 @@ $Arguments = @(
     "-I$UpstreamInclude",
     "-I$(Join-Path $FrozenUnit 'src')"
 )
-if ($FullSuite) {
+if ($SoftContinue) {
+    # DEBUG ONLY — not parity. Soft-abort / quiet printf for full failure lists.
     $Arguments += @(
         "-include$(Join-Path $PSScriptRoot 'c\soft_abort.h')",
         "-include$(Join-Path $PSScriptRoot 'c\quiet_printf.h')"
@@ -171,29 +178,61 @@ if ($FullSuite) {
 }
 $Arguments += $Sources + @($Library) + $NativeStaticLibs
 if ($FullSuite) {
+    # Retained only for staticlib + mpack-platform.c vs Rust #[no_mangle] overlap.
     $Arguments += "-Wl,--allow-multiple-definition"
 }
 $Arguments += @("-o", $Output)
 
 & $Compiler @Arguments
 if ($LASTEXITCODE -ne 0) {
-    if ($Full -and $ExpectMissing) {
-        Write-Host "Full frozen-suite link is incomplete as expected: Rust writer symbols remain to be implemented."
-        exit 0
-    }
     exit $LASTEXITCODE
 }
 
-& $Output
+if (-not $Full) {
+    # Nil smoke only — not the frozen unit suite.
+    & $Output
+    exit $LASTEXITCODE
+}
+
+# Capture suite stdout/stderr so we can parse the C harness summary while still
+# printing it. Parity = suite exit + "Unit testing complete. N failures".
+$SuiteOut = & $Output 2>&1 | ForEach-Object { $_.ToString() }
 $SuiteExit = $LASTEXITCODE
-if ($FullSuite) {
-    # Match run.py: Python signals are <0; Windows SEH / abnormal exits are >=128
-    # (e.g. STATUS_ACCESS_VIOLATION = 0xC0000005). Assertion failures return 1.
-    if ($SuiteExit -lt 0 -or $SuiteExit -ge 128) {
-        Write-Host "Everything frozen suite crashed (exit=$SuiteExit); treating as failure."
+$SuiteText = ($SuiteOut -join "`n")
+if ($SuiteText) {
+    Write-Host $SuiteText
+}
+
+$SummaryMatch = [regex]::Match(
+    $SuiteText,
+    "Unit testing complete\.\s+(\d+)\s+failures\s+in\s+(\d+)\s+checks\."
+)
+$SoftNote = if ($SoftContinue) { "; soft-continue" } else { "" }
+
+if ($SummaryMatch.Success) {
+    $Failures = [int]$SummaryMatch.Groups[1].Value
+    $Checks = [int]$SummaryMatch.Groups[2].Value
+    Write-Host "Frozen suite summary (from C harness): $Failures failures in $Checks checks (process exit=$SuiteExit$SoftNote)."
+    if ($Failures -ne 0) {
+        if ($SuiteExit -ne 0) { exit $SuiteExit }
         exit 1
     }
-    Write-Host "Everything frozen suite finished (exit=$SuiteExit; assertion failures expected with stubs)."
+    if ($SuiteExit -ne 0) {
+        Write-Host "Summary reports 0 failures but process exit is non-zero; forwarding suite exit."
+        exit $SuiteExit
+    }
     exit 0
 }
-exit $SuiteExit
+
+# No summary: typical when TEST_EARLY_EXIT aborts before main returns.
+if ($SuiteExit -lt 0 -or $SuiteExit -ge 128) {
+    Write-Host "Frozen suite aborted/crashed before summary (exit=$SuiteExit); treating as failure."
+    if ($SuiteExit -eq 0) { exit 1 }
+    exit $SuiteExit
+}
+if ($SuiteExit -ne 0) {
+    Write-Host "Frozen suite exited without a Unit testing complete summary (exit=$SuiteExit); treating as failure."
+    exit $SuiteExit
+}
+Write-Host "Frozen suite exit 0 but missing Unit testing complete summary; treating as failure."
+exit 1

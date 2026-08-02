@@ -18,7 +18,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Default ABI feature | embed-writer layout (Cargo feature off) | Matches upstream `embed-writer` unit config so debug/release writer layouts stay identical. |
 | Everything-suite ABI | Cargo feature `full-suite-abi` | Switches `#[repr(C)]` to the upstream everything layout (extensions, tracking, builder, …). One library build cannot satisfy both layouts. |
 | C-visible allocators | Suite hooks `test_malloc` / `test_free` (`MPACK_MALLOC` / `MPACK_FREE`) for pointers returned to C; under frozen-link also for file/track private buffers via `suite_libc` | Frozen everything links with `MPACK_FREE=test_free`, which adjusts `test_malloc_active`. Mixing libc `malloc` with suite `test_free` underflows the counter (`test-system.c`). |
-| Everything-gate soft abort | Force-include soft `abort` redirect | Suite hardcodes `TEST_EARLY_EXIT`; soft abort lets the process print a failure summary instead of dying on the first assertion. Ops detail: `tests/port/frozen-link/README.md`. |
+| Everything parity gate | Runner forwards C suite exit + `Unit testing complete. N failures` | Acceptance is the frozen harness itself (`tests/original/.../test.c`). Soft-abort / quiet printf are opt-in `--soft-continue` only (debug; still not fake green). `--expect-missing` removed. How-to: `tests/port/frozen-link/README.md`. |
 
 ## FFI boundary and ownership
 
@@ -40,7 +40,8 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Writer FFI surface | `src/ffi/writer.rs` | Fixed buffer, growable (suite allocator under everything), flush / error / teardown callbacks, filename/stdfile, compound start/build/complete, timestamps/ext, UTF-8 helpers. |
 | Builder page storage | Rust side-table (`Mutex<HashMap<usize, …>>` keyed by writer pointer); ABI `builder` field left empty for layout | C stores builder pages inside `mpack_writer_t.builder`. The side-table keeps compound-size resolution without growing unsafe fields inside the C struct. Observable if C inspects builder pointers. |
 | Write-tracking hooks | Real FFI tracking under `full-suite-abi` | Initializes the ABI track stack and wires element, byte, compound, and builder push/pop checks through `src/ffi/stubs/track.rs`, including frozen-suite `mpack_break_hit` semantics. |
-| Embed-writer gate | `python3 tests/port/frozen-link/run.py --full` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` (see team ownership rules). |
+| Embed-writer gate | `python3 tests/port/frozen-link/run.py --full` | Writer lane acceptance: frozen suite under embed-writer reports `0 failures` and exit 0 (C harness verdict; see team ownership rules). |
+| Everything gate | `python3 tests/port/frozen-link/run.py --full --everything` | Reader/Expect/Node (and related) acceptance: same C harness verdict under everything + `full-suite-abi`. Runner must not map failures to success. |
 
 ## Reader vertical slice
 
@@ -87,7 +88,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 - **MPack**: Compile-time `mpack-config.h` toggles fields on `mpack_writer_t` / `mpack_reader_t` / tags.
 - **Rust intent**: Two explicit Cargo layouts — default embed-writer vs `full-suite-abi` — rather than one mega-struct with cfg soup in every export.
-- **Status**: Mutually exclusive. Layout checks live under `tests/port/full_abi_layout.rs` and frozen-link. Embed-writer frozen-link is the Writer gate; everything uses `full-suite-abi` + staticlib on Windows so suite symbols (`test_malloc`, `mpack_assert_fail`) resolve.
+- **Status**: Mutually exclusive. Layout checks live under `tests/port/full_abi_layout.rs` and frozen-link. Embed-writer and everything gates both require the C harness `0 failures` + exit 0 (`run.py` forwards; no fake green). Everything uses `full-suite-abi` + staticlib on Windows so suite symbols (`test_malloc`, `mpack_assert_fail`) resolve. Staticlib link may still use `-Wl,--allow-multiple-definition` for `mpack-platform.c` vs Rust export overlap (documented risk; prefer eliminating duplicates).
 
 ### Sticky errors / NULL / assert
 

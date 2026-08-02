@@ -181,8 +181,12 @@ pub unsafe fn suite_ferror(file: *mut c_void) -> c_int {
     }
 }
 
-/// Cargo-test / local shims. Omitted under `--cfg mpack_frozen_link` so the
+/// Cargo-test / local shims only. Omitted under `--cfg mpack_frozen_link` so the
 /// frozen C suite owns these symbols at final executable link.
+///
+/// **Not for acceptance:** empty `mpack_assert_fail` / `mpack_break_hit` and
+/// noop `test_free` dilute checks. Frozen-link parity must use `mpack_frozen_link`
+/// (see `tests/port/frozen-link/`) so the real suite implementations link in.
 #[cfg(all(feature = "full-suite-abi", not(mpack_frozen_link)))]
 mod suite_shims {
     use super::*;
