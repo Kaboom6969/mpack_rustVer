@@ -410,11 +410,17 @@ pub fn str_match(reader: &mut Reader<'_>, expected: &[u8]) -> bool {
     if length as usize != expected.len() {
         return fail_bool(reader);
     }
-    match reader.read_bytes(expected.len()) {
-        Some(bytes) if bytes == expected => true,
-        Some(_) => fail_bool(reader),
-        None => false,
+    // Match C `mpack_expect_str_match`: compare one native byte at a time so a
+    // mismatch sticky-errors as `Type` before a truncated payload becomes
+    // `Invalid` from a bulk `read_bytes`.
+    for &want in expected {
+        match reader.read_native_u8() {
+            Some(got) if got == want => {}
+            Some(_) => return fail_bool(reader),
+            None => return false,
+        }
     }
+    true
 }
 
 pub fn cstr(reader: &mut Reader<'_>, buf: &mut [u8]) -> bool {

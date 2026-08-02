@@ -746,7 +746,10 @@ pub fn expect_digest_rust(data: &[u8]) -> Digest {
                 }
                 let mut expect_buf = [0u8; 32];
                 for i in 0..n as usize {
-                    expect_buf[i] = cursor.take_u8();
+                    // C `mpack_expect_str_match` compares `uint8_t` to `char`;
+                    // on signed-char platforms bytes ≥ 0x80 falsely Type-error.
+                    // Keep expected bytes ASCII so both oracles stay comparable.
+                    expect_buf[i] = cursor.take_u8() & 0x7f;
                 }
                 let _ = expect::str_match(&mut reader, &expect_buf[..n as usize]);
                 ok = ok_flag(&reader);

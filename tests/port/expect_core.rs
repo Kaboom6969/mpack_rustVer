@@ -1119,6 +1119,16 @@ fn str_match__exact_match_accepts_and_mismatch_sets_type() {
 }
 
 #[test]
+fn str_match__mismatch_before_truncated_payload_flags_type() {
+    // fixstr(3) with only one payload byte that mismatches expected[0]:
+    // C flags Type on the first native-byte compare (not Invalid from EOF).
+    let mut reader = Reader::new(&[0xA3, 0x19]);
+    assert!(!expect::str_match(&mut reader, &[0, 122, 53]));
+    assert_eq!(reader.error(), Error::Type);
+    assert_eq!(reader.used(), 2);
+}
+
+#[test]
 fn cstr__happy_writes_nul_terminated_bytes() {
     let mut buf = [0xAA; 4];
     let mut reader = Reader::new(&[0xA3, b'a', b'b', b'c']);

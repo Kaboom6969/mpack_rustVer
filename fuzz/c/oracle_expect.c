@@ -483,7 +483,9 @@ void oracle_expect_digest(
                 char expect_buf[32];
                 memset(expect_buf, 0, sizeof(expect_buf));
                 for (uint8_t i = 0; i < n; ++i) {
-                    expect_buf[i] = (char)read_u8(ops, ops_len, &cursor);
+                    /* Mask to 7-bit: C compares uint8_t vs char; signed-char
+                     * hosts reject matching payload bytes >= 0x80 as Type. */
+                    expect_buf[i] = (char)(read_u8(ops, ops_len, &cursor) & 0x7f);
                 }
                 mpack_expect_str_match(&reader, expect_buf, n);
                 ok = ok_flag(&reader);
