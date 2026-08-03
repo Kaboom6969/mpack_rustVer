@@ -194,11 +194,28 @@ def main() -> int:
         "  (diff targets: each input compares C oracle vs Rust digests; "
         "mismatch → panic → FAIL)"
     )
+    
+    summary_lines = [
+        "Fuzz run-all summary:",
+        "  (diff targets: each input compares C oracle vs Rust digests; mismatch → panic → FAIL)"
+    ]
+    
     failed = 0
     for fuzz_dir, name, kind, code, runs in results:
-        print(f"  {fuzz_dir}/{name}: {format_status(kind, code, runs)}")
+        line = f"  {fuzz_dir}/{name}: {format_status(kind, code, runs)}"
+        print(line)
+        summary_lines.append(line)
         if code != 0:
             failed += 1
+            
+    log_path = ROOT / "fuzz" / "fuzz_summary_auto.txt"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(summary_lines) + "\n")
+        print(f"\nWrote summary to {log_path}", flush=True)
+    except Exception as e:
+        print(f"Warning: failed to write summary to {log_path}: {e}")
+        
     return 1 if failed else 0
 
 
