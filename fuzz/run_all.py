@@ -20,11 +20,13 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -122,6 +124,69 @@ def format_status(kind: str, code: int, runs: int | None) -> str:
     )
 
 
+def collect_env_info(args: argparse.Namespace, env: dict[str, str]) -> list[str]:
+    lines = [
+        "=== Fuzz Log ===",
+        f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Platform: {sys.platform} (os.name={os.name})",
+    ]
+
+    try:
+        git_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=ROOT)
+        if git_commit.returncode == 0:
+            lines.append(f"Git Commit: {git_commit.stdout.strip()}")
+        git_branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, cwd=ROOT)
+        if git_branch.returncode == 0:
+            lines.append(f"Git Branch: {git_branch.stdout.strip()}")
+    except Exception:
+        pass
+
+    try:
+        rustc_proc = subprocess.run(["rustc", "+nightly", "-vV"], capture_output=True, text=True, cwd=ROOT)
+        if rustc_proc.returncode == 0:
+            lines.append("Rustc Nightly Info:")
+            for line in rustc_proc.stdout.strip().splitlines():
+                lines.append(f"  {line}")
+    except Exception:
+        pass
+
+    try:
+        cf_proc = subprocess.run(["cargo", "+nightly", "fuzz", "--version"], capture_output=True, text=True, cwd=ROOT)
+        if cf_proc.returncode == 0:
+            lines.append(f"Cargo Fuzz Version: {cf_proc.stdout.strip()}")
+    except Exception:
+        pass
+
+    lines.append("Compiler & Linker Environment:")
+    lines.append(f"  CXX: {env.get('CXX', '')}")
+    lines.append(f"  CC: {env.get('CC', '')}")
+    lines.append(f"  RUSTFLAGS: {env.get('RUSTFLAGS', '')}")
+
+    meta_path = ROOT / "target" / "upstream" / "mpack" / "pinned" / ".resolved.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            lines.append("Upstream MPack C Oracle (Pinned):")
+            lines.append(f"  Source URL: {meta.get('source_url', '')}")
+            lines.append(f"  Source Version: {meta.get('source_version', '')}")
+            lines.append(f"  Kickoff Hash: {meta.get('kickoff_hash', '')}")
+            lines.append(f"  Resolution Kind: {meta.get('resolution_kind', '')}")
+            lines.append(f"  Resolved Commit: {meta.get('resolved_commit', '')}")
+        except Exception:
+            pass
+
+    lines.append("Fuzz Configuration Parameters:")
+    lines.append(f"  --seconds (max_total_time): {args.seconds}")
+    lines.append(f"  --max-len (max_len): {args.max_len}")
+    lines.append(f"  --runs: {args.runs if args.runs is not None else 'None (unlimited / time-based)'}")
+    lines.append("Targets To Run:")
+    for fuzz_dir, name, kind in TARGETS:
+        lines.append(f"  - {fuzz_dir}/{name} (mode: {kind})")
+
+    lines.append("")
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -158,6 +223,9 @@ def main() -> int:
 
     run_helper("ensure")
 
+    env_info = collect_env_info(args, env)
+    log_chunks: list[str] = ["\n".join(env_info) + "\n"]
+
     results: list[tuple[str, str, str, int, int | None]] = []
     for fuzz_dir, name, kind in TARGETS:
         fuzz_path = ROOT / fuzz_dir
@@ -177,10 +245,15 @@ def main() -> int:
         if args.runs is not None:
             cmd.append(f"-runs={args.runs}")
 
-        print("=" * 72)
-        print(f"+ {' '.join(cmd)}")
-        print("=" * 72, flush=True)
+        divider = "=" * 72 + "\n" + f"+ {' '.join(cmd)}\n" + "=" * 72 + "\n"
+        print(divider, end="", flush=True)
+        log_chunks.append(divider)
+
         code, output = run_streaming(cmd, env)
+        log_chunks.append(output)
+        if not output.endswith("\n"):
+            log_chunks.append("\n")
+
         runs = parse_done_runs(output)
         results.append((fuzz_dir, name, kind, code, runs))
         if code != 0:
@@ -189,17 +262,12 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    print("\nFuzz run-all summary:")
-    print(
-        "  (diff targets: each input compares C oracle vs Rust digests; "
-        "mismatch → panic → FAIL)"
-    )
-    
+    summary_header = "\n========================================================================\n"
     summary_lines = [
         "Fuzz run-all summary:",
         "  (diff targets: each input compares C oracle vs Rust digests; mismatch → panic → FAIL)"
     ]
-    
+
     failed = 0
     for fuzz_dir, name, kind, code, runs in results:
         line = f"  {fuzz_dir}/{name}: {format_status(kind, code, runs)}"
@@ -207,15 +275,21 @@ def main() -> int:
         summary_lines.append(line)
         if code != 0:
             failed += 1
-            
-    log_path = ROOT / "fuzz" / "fuzz_summary_auto.txt"
-    try:
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(summary_lines) + "\n")
-        print(f"\nWrote summary to {log_path}", flush=True)
-    except Exception as e:
-        print(f"Warning: failed to write summary to {log_path}: {e}")
-        
+
+    summary_text = summary_header + "\n".join(summary_lines) + "\n"
+    log_chunks.append(summary_text)
+
+    full_log = "".join(log_chunks)
+
+    log_paths = [ROOT / "fuzz" / "fuzz_summary_auto.txt", ROOT / "fuzz_log.txt"]
+    for path in log_paths:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(full_log)
+            print(f"\nWrote full fuzz log and summary to {path}", flush=True)
+        except Exception as e:
+            print(f"Warning: failed to write log to {path}: {e}")
+
     return 1 if failed else 0
 
 

@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -45,6 +46,9 @@ EVERYTHING_DEFINES = [
 SUMMARY_RE = re.compile(
     r"Unit testing complete\.\s+(\d+)\s+failures\s+in\s+(\d+)\s+checks\."
 )
+TEST_FAILED_RE = re.compile(r"^TEST FAILED AT\b")
+# Incidental stdout from frozen print tests (e.g. mpack_print("testing...")).
+INCIDENTAL_PRINT_RE = re.compile(r'^\s*"testing\.\.\."\s*$')
 
 
 def resolve_upstream_include() -> Path:
@@ -237,12 +241,6 @@ def suite_verdict(returncode: int, stdout: str, *, soft_continue: bool) -> int:
     if match:
         failures = int(match.group(1))
         checks = int(match.group(2))
-        print(
-            f"Frozen suite summary (from C harness): "
-            f"{failures} failures in {checks} checks "
-            f"(process exit={returncode}"
-            f"{'; soft-continue' if soft_continue else ''})."
-        )
         if failures != 0:
             # Suite already returns EXIT_FAILURE; force non-zero if somehow 0.
             return returncode if returncode != 0 else 1
@@ -276,38 +274,190 @@ def suite_verdict(returncode: int, stdout: str, *, soft_continue: bool) -> int:
     return 1
 
 
-def run_suite_executable(executable: Path, *, soft_continue: bool) -> int:
+def extract_suite_signal_lines(stdout: str, stderr: str) -> tuple[list[str], list[str], str | None]:
+    """Keep harness signal lines; drop incidental C print-test stdout."""
+    failures: list[str] = []
+    other: list[str] = []
+    summary: str | None = None
+
+    for raw in (stdout or "").splitlines() + (stderr or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if INCIDENTAL_PRINT_RE.match(line):
+            continue
+        if SUMMARY_RE.search(line):
+            summary = line.strip()
+            continue
+        if TEST_FAILED_RE.match(line.strip()):
+            failures.append(line.strip())
+            continue
+        # Keep unexpected residual lines (rare) for debugging.
+        other.append(line)
+
+    return failures, other, summary
+
+
+def collect_env_info(config_name: str, profile: str, soft_continue: bool) -> list[str]:
+    lines = [
+        "=== Suite Log ===",
+        f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Platform: {sys.platform} (os.name={os.name})",
+    ]
+
+    try:
+        git_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if git_commit.returncode == 0:
+            lines.append(f"Git Commit: {git_commit.stdout.strip()}")
+        git_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if git_branch.returncode == 0:
+            lines.append(f"Git Branch: {git_branch.stdout.strip()}")
+    except Exception:
+        pass
+
+    try:
+        rustc_proc = subprocess.run(
+            ["rustc", "-vV"],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if rustc_proc.returncode == 0:
+            lines.append("Rustc Info:")
+            for line in rustc_proc.stdout.strip().splitlines():
+                lines.append(f"  {line}")
+    except Exception:
+        pass
+
+    compiler = (
+        os.environ.get("CC")
+        or shutil.which("gcc")
+        or shutil.which("cc")
+        or shutil.which("clang")
+        or "gcc"
+    )
+    lines.append("Compiler Environment:")
+    lines.append(f"  CC: {compiler}")
+
+    lines.append("Suite Configuration:")
+    lines.append(f"  Config Name: {config_name}")
+    lines.append(f"  Profile: {profile}")
+    lines.append(f"  Soft Continue: {soft_continue}")
+    lines.append("")
+    return lines
+
+
+def format_suite_log(
+    *,
+    config_name: str,
+    profile: str,
+    soft_continue: bool,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Structured suite log aligned with fuzz_log style (no incidental print noise)."""
+    chunks = collect_env_info(config_name, profile, soft_continue)
+    failures, other, summary = extract_suite_signal_lines(stdout, stderr)
+    match = SUMMARY_RE.search(stdout or "")
+    failures_n = int(match.group(1)) if match else None
+    checks_n = int(match.group(2)) if match else None
+
+    chunks.append("=" * 72)
+    chunks.append("Suite Result:")
+    if match and failures_n is not None and checks_n is not None:
+        status = "ok" if failures_n == 0 and returncode == 0 else "FAIL"
+        chunks.append(
+            f"  Status: {status} - {failures_n} failures in {checks_n} checks "
+            f"(process exit={returncode}"
+            f"{'; soft-continue' if soft_continue else ''})"
+        )
+        if summary:
+            chunks.append(f"  Harness: {summary}")
+    elif returncode < 0 or returncode >= 128:
+        chunks.append(
+            f"  Status: FAIL - aborted/crashed before summary (exit={returncode})"
+        )
+    else:
+        chunks.append(
+            f"  Status: FAIL - missing Unit testing complete summary "
+            f"(exit={returncode})"
+        )
+
+    chunks.append("")
+    chunks.append("Failures:")
+    if failures:
+        for line in failures:
+            chunks.append(f"  {line}")
+    else:
+        chunks.append("  (none)")
+
+    if other:
+        chunks.append("")
+        chunks.append("Other harness output (filtered):")
+        for line in other:
+            chunks.append(f"  {line}")
+
+    chunks.append("")
+    chunks.append(
+        "Notes: incidental C print-test stdout (e.g. quoted \"testing...\") "
+        "is omitted; pass/fail comes only from the harness summary / "
+        "TEST FAILED lines."
+    )
+    chunks.append("")
+    return "\n".join(chunks)
+
+
+def run_suite_executable(
+    executable: Path,
+    *,
+    soft_continue: bool,
+    config_name: str = "everything",
+    profile: str = "debug",
+) -> int:
     completed = subprocess.run(
         [str(executable)],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
-    if completed.stdout:
-        sys.stdout.write(completed.stdout)
-        if not completed.stdout.endswith("\n"):
-            sys.stdout.write("\n")
-    if completed.stderr:
-        sys.stderr.write(completed.stderr)
-        if not completed.stderr.endswith("\n"):
-            sys.stderr.write("\n")
-            
+
+    log_text = format_suite_log(
+        config_name=config_name,
+        profile=profile,
+        soft_continue=soft_continue,
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+    # Console: same structured view (no raw "testing..." spam).
+    sys.stdout.write(log_text)
+    if not log_text.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
     log_path = ROOT / "suite_log.txt"
     try:
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"=== Suite Log ===\n")
-            if completed.stdout:
-                f.write(completed.stdout)
-                if not completed.stdout.endswith("\n"):
-                    f.write("\n")
-            if completed.stderr:
-                f.write(completed.stderr)
-                if not completed.stderr.endswith("\n"):
-                    f.write("\n")
+        log_path.write_text(log_text, encoding="utf-8")
     except Exception as e:
         print(f"Warning: failed to write log to {log_path}: {e}")
 
-    verdict = suite_verdict(completed.returncode, completed.stdout or "", soft_continue=soft_continue)
+    verdict = suite_verdict(
+        completed.returncode,
+        completed.stdout or "",
+        soft_continue=soft_continue,
+    )
     print(f"\nWrote {log_path}", flush=True)
     return verdict
 
@@ -480,7 +630,12 @@ def main() -> int:
         return result.returncode
 
     if run_frozen_suite:
-        return run_suite_executable(executable, soft_continue=soft_continue)
+        return run_suite_executable(
+            executable,
+            soft_continue=soft_continue,
+            config_name=config_name,
+            profile=profile,
+        )
     run([str(executable)])
     return 0
 

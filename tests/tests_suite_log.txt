@@ -1,0 +1,29 @@
+=== Suite Log ===
+Timestamp: 2026-08-03 16:34:36 UTC
+Platform: win32 (os.name=nt)
+Git Commit: ba0f281560885f98e4810e70c568f0991a0139fe
+Git Branch: master
+Rustc Info:
+  rustc 1.97.1 (8bab26f4f 2026-07-14)
+  binary: rustc
+  commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+  commit-date: 2026-07-14
+  host: x86_64-pc-windows-msvc
+  release: 1.97.1
+  LLVM version: 22.1.6
+Compiler Environment:
+  CC: C:\Strawberry\c\bin\gcc.EXE
+Suite Configuration:
+  Config Name: everything
+  Profile: debug
+  Soft Continue: False
+
+========================================================================
+Suite Result:
+  Status: ok - 0 failures in 1018304 checks (process exit=0)
+  Harness: Unit testing complete. 0 failures in 1018304 checks.
+
+Failures:
+  (none)
+
+Notes: incidental C print-test stdout (e.g. quoted "testing...") is omitted; pass/fail comes only from the harness summary / TEST FAILED lines.
