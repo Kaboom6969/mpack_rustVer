@@ -8,6 +8,19 @@ GitHub language bars overweight C because of the frozen suite and vendored ABI
 headers (`include/upstream/`), not because codecs ship as C sources. Non-trivial
 divergences live in [`DECISIONS.md`](DECISIONS.md).
 
+## Evidence for reviewers
+
+| Criterion | Where to look |
+| --- | --- |
+| Unmodified frozen suite | `tests/original/` (kickoff hash in `.port-mortem.toml`); link via `tests/port/frozen-link/` — does **not** compile C codec sources |
+| Suite green | `python3 tests/port/frozen-link/run.py --everything` → C harness `0 failures` (also `--embed-writer`) |
+| Differential fuzz (C oracle vs Rust) | `fuzz/`: shared inputs, digest/transfer mismatch panics; driver `python3 fuzz/run_all.py --seconds 60`; recorded runs in [`fuzz/log.txt`](fuzz/log.txt) |
+| Upstream C finding | [`fuzz/c_findings.md`](fuzz/c_findings.md) — `mpack_write_str(NULL,0)` UB under UBSan; Rust FFI hardens the same API shape |
+| Fair bench (p99 / RSS / startup) | [`bench/methodology.md`](bench/methodology.md), [`bench/results.json`](bench/results.json) — identical C driver, interleaved trials, allocator gate |
+| Unsafe isolation | `src/{common,writer,reader,expect,node}` are `forbid(unsafe_code)`; raw pointers only in `src/ffi/` for the C ABI |
+| Decision log | [`DECISIONS.md`](DECISIONS.md) |
+| One-command smoke | `docker build -t mpack-rust . && docker run --rm mpack-rust` |
+
 ## Repository layout
 
 | Path | Role |
@@ -39,8 +52,9 @@ python3 tests/port/frozen-link/run.py --embed-writer
 python3 tests/port/frozen-link/run.py --everything
 ```
 
-Running frozen-link **without** a suite flag only builds the nil smoke probe —
-that is **not** a run of `tests/original/`. Details:
+On Windows use `py -3` if `python3` is the Store stub. Running frozen-link
+**without** a suite flag only builds the nil smoke probe — that is **not** a run
+of `tests/original/`. Details:
 [`tests/port/frozen-link/README.md`](tests/port/frozen-link/README.md).
 
 ## Build and test
@@ -63,7 +77,9 @@ docker run --rm mpack-rust
 
 ## Differential fuzz (WSL / Linux)
 
-Requires nightly + cargo-fuzz and a C++ toolchain (`g++`).
+Same bytes go to the pinned upstream C oracle and the Rust safe core; any digest
+or transfer mismatch panics (libFuzzer finding). Requires nightly, cargo-fuzz,
+and `g++`.
 
 ```bash
 rustup toolchain install nightly
@@ -73,7 +89,7 @@ python3 fuzz/run_all.py --seconds 60
 py -3 tools/upstream_mpack.py cleanup
 ```
 
-See [`fuzz/README.md`](fuzz/README.md).
+See [`fuzz/README.md`](fuzz/README.md) and [`fuzz/log.txt`](fuzz/log.txt).
 
 ## Fair benchmarks
 
