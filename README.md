@@ -1,8 +1,12 @@
 # MPack → Rust (Port Mortem 2026)
 
 C → Rust port of [MPack](https://github.com/ludocode/mpack) (MessagePack C library)
-from `original_c/mpack-develop/` into idiomatic Rust under `src/`, with a C-ABI FFI
-layer so the frozen unit suite in `tests/original/` can link unchanged.
+into idiomatic Rust under `src/`, with a C-ABI FFI layer so the frozen unit
+suite in `tests/original/` can link unchanged. Differential fuzzing and fair
+benchmarks fetch the pinned upstream C source at runtime into
+`target/upstream/mpack/pinned/`, resolving from `.port-mortem.toml` by trying
+`kickoff_hash` first and falling back to the `source_version` tag when the hash
+is not an upstream MPack commit.
 
 ## Why this migration
 
@@ -16,11 +20,11 @@ layer so the frozen unit suite in `tests/original/` can link unchanged.
 | Path | Role |
 | --- | --- |
 | `src/` | Idiomatic Rust port (safe core + eventual FFI) |
-| `original_c/` | Reference C sources (unchanged) |
 | `tests/original/` | Frozen C unit suite (do not edit) |
 | `tests/port/` | New Rust-side tests |
 | `fuzz/` | Differential fuzz (C oracle vs Rust safe core; WSL/Linux + cargo-fuzz) |
 | `bench/` | Benchmark methodology and results |
+| `tools/upstream_mpack.py` | Resolve, fetch, and optionally clean the pinned upstream MPack checkout |
 | `.port-mortem.toml` | Track, source URL, kickoff hashes |
 | `Dockerfile` | One-command buildable artifact |
 
@@ -55,17 +59,6 @@ accessors, `nil -> 0xc0`, sticky capacity errors, null-pointer hardening, and
 panic containment. The root build only compiles the C harness when the
 `ffi-harness` feature is enabled.
 
-## Build (C reference suite)
-
-From `original_c/mpack-develop/` (use `CC=gcc`):
-
-```bash
-CC=gcc python3 test/unit/configure.py
-CC=gcc ninja -f .build/unit/build.ninja more
-```
-
-A passing run prints `Unit testing complete. 0 failures in <N> checks.` per variant.
-
 ## Docker (single command)
 
 ```bash
@@ -87,6 +80,8 @@ cargo +nightly install cargo-fuzz
 python3 fuzz/run_all.py --seconds 60
 # or one target:
 cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
+# after review, remove the cached upstream checkout explicitly if desired:
+py -3 tools/upstream_mpack.py cleanup
 ```
 
 See [`fuzz/README.md`](fuzz/README.md) for the full target table, oracle

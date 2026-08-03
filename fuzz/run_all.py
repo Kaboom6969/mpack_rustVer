@@ -24,6 +24,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HELPER = ROOT / "tools" / "upstream_mpack.py"
 
 TARGETS = [
     ("fuzz", "reader_diff"),
@@ -33,6 +34,39 @@ TARGETS = [
     ("fuzz", "writer_diff"),
     ("fuzz_ffi", "ffi_crash"),
 ]
+
+
+def run_helper(command: str) -> str:
+    result = subprocess.run(
+        [sys.executable, str(HELPER), command],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def using_msvc_host() -> bool:
+    rustc = subprocess.run(
+        ["rustc", "-vV"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return "host: x86_64-pc-windows-msvc" in rustc.stdout
+
+
+def ensure_supported_host() -> None:
+    if using_msvc_host():
+        raise SystemExit(
+            "fuzz/run_all.py requires Linux or WSL in this workspace; "
+            "Windows MSVC cargo-fuzz builds are missing the ASAN runtime "
+            "needed by libFuzzer."
+        )
 
 
 def main() -> int:
@@ -61,11 +95,15 @@ def main() -> int:
         print("cargo not found on PATH", file=sys.stderr)
         return 1
 
+    ensure_supported_host()
+
     env = os.environ.copy()
     env.setdefault("CXX", "g++")
     rustflags = env.get("RUSTFLAGS", "")
     if "-C linker=g++" not in rustflags:
         env["RUSTFLAGS"] = (rustflags + " -C linker=g++").strip()
+
+    run_helper("ensure")
 
     results: list[tuple[str, str, int]] = []
     for fuzz_dir, name in TARGETS:

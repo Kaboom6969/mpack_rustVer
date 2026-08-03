@@ -1,8 +1,10 @@
 # Benchmark methodology
 
-Fair comparison of upstream C MPack (`original_c/mpack-develop/`) against the
-Rust port’s **C ABI** (`full-suite-abi` staticlib) on identical MessagePack
-workloads.
+Fair comparison of upstream C MPack from the pinned runtime cache
+(`target/upstream/mpack/pinned/`) against the Rust port’s **C ABI**
+(`full-suite-abi` staticlib) on identical MessagePack workloads. Resolution
+tries `.port-mortem.toml` `kickoff_hash` first and falls back to the
+`source_version` tag when that hash is not an upstream MPack commit.
 
 ## Locked fairness contract (1A + 2B)
 
@@ -26,7 +28,7 @@ Rust binary passes the post-link allocator gate.
 1. **Encode throughput** — growable writer; fixed nested map/array (ints, strings, bins); docs/s and MB/s after warm-up.
 2. **Decode throughput** — same fixture via **reader** (`mpack_discard`) and via **node/tree**; docs/s and MB/s.
 3. **p99 latency** — ≥10k single-document encode / decode-reader / decode-node; report p50 / p99 / max.
-4. **RSS (decode-only)** — parent pre-encodes a ~16 MiB fixture to disk; each trial is a **fresh process** that only loads the fixture and runs node decode, then reports `getrusage(RUSAGE_SELF).ru_maxrss`. Encode peak is not included.
+4. **RSS (decode-only)** — parent pre-encodes a ~16 MiB fixture to disk; each trial is a **fresh process** that only loads the fixture and runs node decode, then reports `getrusage(RUSAGE_SELF).ru_maxrss`. Encode peak is not included. On Windows this metric is marked unsupported because the harness does not have a portable `ru_maxrss` equivalent there.
 5. **Startup** — cold process: wall time to first successful nil encode (no warm-up; measured by `bench/run.py`).
 
 ## Procedure
@@ -39,6 +41,7 @@ python3 bench/run.py
 - Throughput: warm-up then timed region; each metric ≥5 trials; store **median** and raw trials.
 - Record environment in `results.json` (`cpu`, `os`, `rustc`, `cc`, commit, define lockstring, allocator gate evidence, interleave seed).
 - Set `"status": "measured"` only after fixture + allocator gates succeed. Do not treat null / placeholder metrics as parity.
+- The benchmark runner does not delete the pinned upstream cache automatically; remove it manually after review if desired via `py -3 tools/upstream_mpack.py cleanup`.
 
 ## Out of scope
 

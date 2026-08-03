@@ -12,7 +12,7 @@ Hard gates before status=measured:
 """
 
 from __future__ import annotations
-
+import argparse
 import json
 import os
 import platform
@@ -30,8 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT / "bench"
 BENCH_C = BENCH / "c"
 BUILD = ROOT / "target" / "bench"
-UPSTREAM_SRC = ROOT / "original_c" / "mpack-develop" / "src"
-UPSTREAM_MPACK = UPSTREAM_SRC / "mpack"
+HELPER = ROOT / "tools" / "upstream_mpack.py"
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 
 TRIALS = 5
@@ -51,15 +50,6 @@ DEFINE_LOCK = (
 
 OPT_LOCK = "C:-O2 -DNDEBUG -std=gnu11 -D_DEFAULT_SOURCE; Rust:cargo --release --features full-suite-abi"
 
-MPACK_C_SOURCES = [
-    UPSTREAM_MPACK / "mpack-common.c",
-    UPSTREAM_MPACK / "mpack-writer.c",
-    UPSTREAM_MPACK / "mpack-reader.c",
-    UPSTREAM_MPACK / "mpack-expect.c",
-    UPSTREAM_MPACK / "mpack-node.c",
-    UPSTREAM_MPACK / "mpack-platform.c",
-]
-
 SYMBOL_RE = re.compile(r"^[0-9a-fA-F]+ <(?P<name>[^>]+)>:\s*$")
 
 
@@ -68,11 +58,37 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=ROOT, check=True, env=env)
 
 
+def run_helper(command: str) -> str:
+    result = subprocess.run(
+        [sys.executable, str(HELPER), command],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def upstream_paths() -> tuple[Path, Path]:
+    upstream_src = Path(run_helper("ensure"))
+    return upstream_src, upstream_src / "mpack"
+
+
 def compiler() -> str:
     return os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc") or "gcc"
 
 
-def cflags() -> list[str]:
+def rust_target_for_bench(cc: str) -> str | None:
+    if os.name != "nt":
+        return None
+    exe = Path(cc).name.lower()
+    if "gcc" in exe or "g++" in exe:
+        return "x86_64-pc-windows-gnu"
+    return None
+
+
+def cflags(upstream_src: Path) -> list[str]:
     return [
         "-std=gnu11",
         "-O2",
@@ -80,22 +96,42 @@ def cflags() -> list[str]:
         "-D_DEFAULT_SOURCE",
         "-DMPACK_HAS_CONFIG=1",
         f"-I{BENCH_C}",
-        f"-I{UPSTREAM_SRC}",
+        f"-I{upstream_src}",
     ]
 
 
 def native_libs() -> list[str]:
-    return ["-ldl", "-lpthread", "-lm"]
+    libs = ["-ldl", "-lpthread", "-lm"]
+    if os.name == "nt":
+        libs.extend(
+            ["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
+        )
+    return libs
 
 
-def build_c_binary() -> Path:
+def mpack_c_sources(upstream_mpack: Path) -> list[Path]:
+    return [
+        upstream_mpack / "mpack-common.c",
+        upstream_mpack / "mpack-writer.c",
+        upstream_mpack / "mpack-reader.c",
+        upstream_mpack / "mpack-expect.c",
+        upstream_mpack / "mpack-node.c",
+        upstream_mpack / "mpack-platform.c",
+    ]
+
+
+def executable_name(stem: str) -> str:
+    return f"{stem}.exe" if os.name == "nt" else stem
+
+
+def build_c_binary(upstream_src: Path, upstream_mpack: Path) -> Path:
     BUILD.mkdir(parents=True, exist_ok=True)
-    out = BUILD / "mpack_bench_c"
+    out = BUILD / executable_name("mpack_bench_c")
     cmd = [
         compiler(),
-        *cflags(),
+        *cflags(upstream_src),
         str(BENCH_C / "bench_main.c"),
-        *[str(p) for p in MPACK_C_SOURCES],
+        *[str(p) for p in mpack_c_sources(upstream_mpack)],
         "-o",
         str(out),
         *native_libs(),
@@ -104,37 +140,40 @@ def build_c_binary() -> Path:
     return out
 
 
-def build_rust_staticlib() -> Path:
+def build_rust_staticlib(cc: str) -> Path:
     # No mpack_frozen_link: OWNED_BUFFER_CAPACITY stays 4096 (matches C).
     # Suite shims' leaky test_free is overridden at final link by bench_shims.c.
     # assert_rust_identity_allocators() hard-fails if the override did not win.
-    run(
-        [
-            "cargo",
-            "rustc",
-            "--release",
-            "--features",
-            "full-suite-abi",
-            "--crate-type",
-            "staticlib",
-        ]
-    )
-    lib = TARGET / "release" / "libmpack.a"
+    cmd = [
+        "cargo",
+        "rustc",
+        "--release",
+        "--features",
+        "full-suite-abi",
+        "--crate-type",
+        "staticlib",
+    ]
+    rust_target = rust_target_for_bench(cc)
+    if rust_target:
+        cmd.extend(["--target", rust_target])
+    run(cmd)
+    target_dir = TARGET / rust_target if rust_target else TARGET
+    lib = target_dir / "release" / "libmpack.a"
     if not lib.exists():
         raise SystemExit(f"missing staticlib at {lib}")
     return lib
 
 
-def build_rust_binary(lib: Path) -> Path:
+def build_rust_binary(lib: Path, upstream_src: Path, upstream_mpack: Path) -> Path:
     BUILD.mkdir(parents=True, exist_ok=True)
-    out = BUILD / "mpack_bench_rust"
+    out = BUILD / executable_name("mpack_bench_rust")
     cmd = [
         compiler(),
-        *cflags(),
+        *cflags(upstream_src),
         # Object files first so --allow-multiple-definition keeps our libc wrappers.
         str(BENCH_C / "bench_main.c"),
         str(BENCH_C / "bench_shims.c"),
-        str(UPSTREAM_MPACK / "mpack-platform.c"),
+        str(upstream_mpack / "mpack-platform.c"),
         str(lib),
         "-o",
         str(out),
@@ -443,24 +482,34 @@ def summarize_interleaved(
     fill_latency(c_out, c_t, "decode_node")
     fill_latency(rust_out, r_t, "decode_node")
 
-    # Decode-only RSS: fresh process loads fixture from disk (no encode).
-    c_t, r_t = interleaved_metric_trials(
-        c_bin,
-        rust_bin,
-        "rss",
-        iters=1,
-        warmup=0,
-        rng=rng,
-        extra_args=["--fixture", str(large_fixture)],
-    )
-    c_out["rss_peak_bytes"] = int(median([t["peak_bytes"] for t in c_t]))
-    c_out["rss_fixture_bytes"] = int(c_t[0]["fixture_bytes"])
-    c_out["rss_mode"] = "decode_only"
-    c_out["rss_trials"] = c_t
-    rust_out["rss_peak_bytes"] = int(median([t["peak_bytes"] for t in r_t]))
-    rust_out["rss_fixture_bytes"] = int(r_t[0]["fixture_bytes"])
-    rust_out["rss_mode"] = "decode_only"
-    rust_out["rss_trials"] = r_t
+    # Decode-only RSS uses getrusage(ru_maxrss), so skip it on Windows.
+    if os.name == "nt":
+        c_out["rss_peak_bytes"] = None
+        c_out["rss_fixture_bytes"] = int(large_fixture.stat().st_size)
+        c_out["rss_mode"] = "unsupported_on_windows"
+        c_out["rss_trials"] = []
+        rust_out["rss_peak_bytes"] = None
+        rust_out["rss_fixture_bytes"] = int(large_fixture.stat().st_size)
+        rust_out["rss_mode"] = "unsupported_on_windows"
+        rust_out["rss_trials"] = []
+    else:
+        c_t, r_t = interleaved_metric_trials(
+            c_bin,
+            rust_bin,
+            "rss",
+            iters=1,
+            warmup=0,
+            rng=rng,
+            extra_args=["--fixture", str(large_fixture)],
+        )
+        c_out["rss_peak_bytes"] = int(median([t["peak_bytes"] for t in c_t]))
+        c_out["rss_fixture_bytes"] = int(c_t[0]["fixture_bytes"])
+        c_out["rss_mode"] = "decode_only"
+        c_out["rss_trials"] = c_t
+        rust_out["rss_peak_bytes"] = int(median([t["peak_bytes"] for t in r_t]))
+        rust_out["rss_fixture_bytes"] = int(r_t[0]["fixture_bytes"])
+        rust_out["rss_mode"] = "decode_only"
+        rust_out["rss_trials"] = r_t
 
     c_s, r_s = interleaved_startup_trials(c_bin, rust_bin, rng)
     c_out["startup_ms"] = median(c_s)
@@ -508,9 +557,15 @@ def collect_environment(
 
 
 def main() -> int:
-    c_bin = build_c_binary()
-    rust_lib = build_rust_staticlib()
-    rust_bin = build_rust_binary(rust_lib)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+
+    upstream_src, upstream_mpack = upstream_paths()
+    cc = compiler()
+
+    c_bin = build_c_binary(upstream_src, upstream_mpack)
+    rust_lib = build_rust_staticlib(cc)
+    rust_bin = build_rust_binary(rust_lib, upstream_src, upstream_mpack)
 
     # Hard gate: refuse measured results if noop test_free won the link.
     allocator_gate = assert_rust_identity_allocators(rust_bin)
