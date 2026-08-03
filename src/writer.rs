@@ -189,6 +189,7 @@ impl<'buffer> Writer<'buffer> {
     }
 
     /// Writes a MessagePack v4 raw/string header, which never uses `str8`.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used from `src/ffi/writer.rs`
     pub(crate) fn write_str_header_v4(&mut self, length: usize) {
         if length <= 31 {
             self.write_header(&[0xa0 | length as u8]);

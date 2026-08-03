@@ -12,21 +12,21 @@ Resolution order is:
 
 ## Packages
 
-| Package | Role |
-| --- | --- |
-| [`fuzz/`](.) | C↔Rust **digest diffs** (`mpack` with `default-features = false` so Rust FFI `#[no_mangle]` does not clash with the C oracle) |
-| [`../fuzz_ffi/`](../fuzz_ffi/) | Crash-only FFI harness (`mpack` with `full-suite-abi`; **no** C oracle) |
+| Package                       | Role                                                                                                                          |
+|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| [`fuzz/`](.)                  | C↔Rust **digest diffs** (`mpack` with `default-features = false` so Rust FFI `#[no_mangle]` does not clash with the C oracle) |
+| [`../fuzz_ffi/`](../fuzz_ffi) | Crash-only FFI harness (`mpack` with `full-suite-abi`; **no** C oracle)                                                       |
 
 ## Targets
 
-| Target | Package | Oracle / mode |
-| --- | --- | --- |
-| `reader_diff` | `fuzz` | One top-level value: iterative `read_tag` + raw str/bin/ext payloads |
-| `node_diff` | `fuzz` | `Tree::parse` / `mpack_tree_parse` + preorder tag digest |
-| `total_diff` | `fuzz` | Same input: both reader and node digests must match C vs Rust |
-| `expect_diff` | `fuzz` | Opcode stream + MessagePack payload → `mpack_expect_*` digest |
-| `writer_diff` | `fuzz` | Read→rewrite growable transfer (mirrors upstream AFL `fuzz.c`) |
-| `ffi_crash` | `fuzz_ffi` | Opcode-driven FFI init/write/read/expect/node/destroy (**crash smoke only**, no C oracle / not parity) |
+| Target        | Package    | Oracle / mode                                                                                          |
+|---------------|------------|--------------------------------------------------------------------------------------------------------|
+| `reader_diff` | `fuzz`     | One top-level value: iterative `read_tag` + raw str/bin/ext payloads                                   |
+| `node_diff`   | `fuzz`     | `Tree::parse` / `mpack_tree_parse` + preorder tag digest                                               |
+| `total_diff`  | `fuzz`     | Same input: both reader and node digests must match C vs Rust                                          |
+| `expect_diff` | `fuzz`     | Opcode stream + MessagePack payload → `mpack_expect_*` digest                                          |
+| `writer_diff` | `fuzz`     | Read→rewrite growable transfer (mirrors upstream AFL `fuzz.c`)                                         |
+| `ffi_crash`   | `fuzz_ffi` | Opcode-driven FFI init/write/read/expect/node/destroy (**crash smoke only**, no C oracle / not parity) |
 
 Depth is capped at 1024 (aligned with upstream `test/fuzz/fuzz.c`). Reader/node
 digests record sticky error, tag records (type / aux / scalar / payload FNV-1a),
@@ -69,6 +69,11 @@ python3 fuzz/run_all.py --seconds 0 --runs 100
 pinned upstream checkout before the first target build, then runs every target
 above in order and exits non-zero if any fail. It does not delete the fetched
 checkout automatically.
+
+**What “ok” means:** libFuzzer exit 0. Diff targets compare C vs Rust digests on
+**every** input and `panic!` on mismatch, so exit 0 after `Done N runs` means
+**N comparisons, 0 divergences**. The summary line prints that explicitly.
+`ffi_crash` only asserts no crash (not parity).
 
 ## Run individually
 
