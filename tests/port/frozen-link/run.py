@@ -22,12 +22,12 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 RUST_TARGET = os.environ.get(
     "MPACK_RUST_TARGET", "x86_64-pc-windows-gnu" if os.name == "nt" else ""
 )
-UPSTREAM_INCLUDE = ROOT / "original_c" / "mpack-develop" / "src"
+VENDORED_UPSTREAM_INCLUDE = ROOT / "include" / "upstream"
 FROZEN_UNIT = ROOT / "tests" / "original" / "test" / "unit"
 EMBED_CONFIG_INCLUDE = ROOT / "tests" / "port" / "ffi-harness" / "include"
 BUILD = ROOT / "target" / "frozen-link"
 
-# Matches original_c configure.py `everything` (+ debug): allfeatures + allconfigs.
+# Matches upstream configure.py `everything` (+ debug): allfeatures + allconfigs.
 EVERYTHING_DEFINES = [
     "MPACK_VARIANT_BUILDS=1",
     "MPACK_READER=1",
@@ -45,6 +45,23 @@ EVERYTHING_DEFINES = [
 SUMMARY_RE = re.compile(
     r"Unit testing complete\.\s+(\d+)\s+failures\s+in\s+(\d+)\s+checks\."
 )
+
+
+def resolve_upstream_include() -> Path:
+    override = os.environ.get("MPACK_UPSTREAM_SRC")
+    if override:
+        include_root = Path(override).expanduser().resolve()
+    else:
+        include_root = VENDORED_UPSTREAM_INCLUDE
+
+    header = include_root / "mpack" / "mpack.h"
+    platform = include_root / "mpack" / "mpack-platform.c"
+    if not header.is_file() or not platform.is_file():
+        raise SystemExit(
+            f"Invalid MPACK_UPSTREAM_SRC/include root: {include_root} "
+            f"(expected mpack/mpack.h and mpack/mpack-platform.c)"
+        )
+    return include_root
 
 
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -107,6 +124,7 @@ def c_command(
     library: Path,
     *,
     config_include: Path,
+    upstream_include: Path,
     debug: bool,
     soft_continue: bool = False,
     extra_defines: list[str] | None = None,
@@ -130,7 +148,7 @@ def c_command(
             "/Zi",
             *[f"/D{define}" for define in defines],
             f"/I{config_include}",
-            f"/I{UPSTREAM_INCLUDE}",
+            f"/I{upstream_include}",
             f"/I{FROZEN_UNIT / 'src'}",
             *(str(source) for source in source_files),
             str(library),
@@ -144,7 +162,7 @@ def c_command(
         "-g",
         *[f"-D{define}" for define in defines],
         f"-I{config_include}",
-        f"-I{UPSTREAM_INCLUDE}",
+        f"-I{upstream_include}",
         f"-I{FROZEN_UNIT / 'src'}",
         *(str(source) for source in source_files),
         str(library),
@@ -412,13 +430,15 @@ def main() -> int:
         debug = False
         extra_defines = None
 
+    upstream_include = resolve_upstream_include()
+
     if run_frozen_suite:
         sources = sorted((FROZEN_UNIT / "src").glob("*.c"))
         executable = BUILD / f"{config_name}-{profile}-frozen"
     else:
         sources = [Path(__file__).parent / "c" / "frozen_nil_smoke.c"]
         executable = BUILD / f"{config_name}-{profile}-nil-smoke"
-    sources.append(ROOT / "original_c" / "mpack-develop" / "src" / "mpack" / "mpack-platform.c")
+    sources.append(upstream_include / "mpack" / "mpack-platform.c")
 
     soft_continue = bool(args.soft_continue)
     if everything:
@@ -430,6 +450,7 @@ def main() -> int:
         executable,
         library,
         config_include=config_include,
+        upstream_include=upstream_include,
         debug=debug,
         soft_continue=soft_continue,
         extra_defines=extra_defines,

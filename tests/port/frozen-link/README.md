@@ -31,6 +31,13 @@ is compiled with GCC. This is required for aggregate-by-value ABI calls such as
 `mpack_tag_cmp()`. Set `MPACK_RUST_TARGET` to override the target when using a
 matching C compiler/toolchain.
 
+The runner needs upstream MPack headers and `mpack-platform.c`. By default it
+uses the vendored copies under `include/upstream/`. To override (e.g. local
+checkout, or verifying against the pinned upstream cache), set
+`MPACK_UPSTREAM_SRC` to an upstream `src/` directory containing
+`mpack/mpack.h` and `mpack/mpack-platform.c` (for example, the path printed by
+`py -3 tools/upstream_mpack.py ensure`.)
+
 ## Embed-writer gate (`--embed-writer`)
 
 ```bash
