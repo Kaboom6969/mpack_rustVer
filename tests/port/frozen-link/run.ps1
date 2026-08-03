@@ -34,7 +34,17 @@ if ($SoftContinue -and -not $EverythingMode) {
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$UpstreamInclude = Join-Path $Root "original_c\mpack-develop\src"
+$VendoredUpstreamInclude = Join-Path $Root "include\upstream"
+$UpstreamInclude = if ($env:MPACK_UPSTREAM_SRC) {
+    (Resolve-Path $env:MPACK_UPSTREAM_SRC).Path
+} else {
+    $VendoredUpstreamInclude
+}
+$Header = Join-Path $UpstreamInclude "mpack\mpack.h"
+$Platform = Join-Path $UpstreamInclude "mpack\mpack-platform.c"
+if (-not (Test-Path $Header) -or -not (Test-Path $Platform)) {
+    throw "Invalid MPACK_UPSTREAM_SRC/include root: $UpstreamInclude (expected mpack\mpack.h and mpack\mpack-platform.c)"
+}
 $FrozenUnit = Join-Path $Root "tests\original\test\unit"
 $EmbedConfigInclude = Join-Path $Root "tests\port\ffi-harness\include"
 $Build = Join-Path $Root "target\frozen-link"
@@ -43,7 +53,7 @@ $RustTarget = if ($env:MPACK_RUST_TARGET) { $env:MPACK_RUST_TARGET } else { "x86
 $Cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 $Compiler = if ($env:CC) { $env:CC } else { "C:\Strawberry\c\bin\gcc.exe" }
 
-# Matches original_c configure.py `everything` (+ debug).
+# Matches upstream configure.py `everything` (+ debug).
 $EverythingDefines = @(
     "MPACK_VARIANT_BUILDS=1",
     "MPACK_READER=1",
@@ -134,7 +144,7 @@ if ($RunFrozenSuite) {
     $Sources = @(Join-Path $PSScriptRoot "c\frozen_nil_smoke.c")
     $Output = Join-Path $Build "$ConfigName-$Profile-nil-smoke.exe"
 }
-$Sources += Join-Path $Root "original_c\mpack-develop\src\mpack\mpack-platform.c"
+$Sources += $Platform
 
 if ($EverythingMode) {
     $Sources += Join-Path $PSScriptRoot "c\full_layout_check.c"
