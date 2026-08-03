@@ -291,7 +291,25 @@ def run_suite_executable(executable: Path, *, soft_continue: bool) -> int:
         sys.stderr.write(completed.stderr)
         if not completed.stderr.endswith("\n"):
             sys.stderr.write("\n")
-    return suite_verdict(completed.returncode, completed.stdout or "", soft_continue=soft_continue)
+            
+    log_path = ROOT / "suite_log.txt"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== Suite Log ===\n")
+            if completed.stdout:
+                f.write(completed.stdout)
+                if not completed.stdout.endswith("\n"):
+                    f.write("\n")
+            if completed.stderr:
+                f.write(completed.stderr)
+                if not completed.stderr.endswith("\n"):
+                    f.write("\n")
+    except Exception as e:
+        print(f"Warning: failed to write log to {log_path}: {e}")
+
+    verdict = suite_verdict(completed.returncode, completed.stdout or "", soft_continue=soft_continue)
+    print(f"\nWrote {log_path}", flush=True)
+    return verdict
 
 
 def main() -> int:
