@@ -1,104 +1,90 @@
 # MPack → Rust (Port Mortem 2026)
 
-C → Rust port of [MPack](https://github.com/ludocode/mpack) (MessagePack C library)
-into idiomatic Rust under `src/`, with a C-ABI FFI layer so the frozen unit
-suite in `tests/original/` can link unchanged. Differential fuzzing and fair
-benchmarks fetch the pinned upstream C source at runtime into
-`target/upstream/mpack/pinned/`, resolving from `.port-mortem.toml` by trying
-`kickoff_hash` first and falling back to the `source_version` tag when the hash
-is not an upstream MPack commit.
+C → Rust port of [MPack](https://github.com/ludocode/mpack). **The library
+implementation is Rust** under `src/` (safe core + C-ABI FFI). The frozen C unit
+suite in `tests/original/` links against that FFI unchanged.
 
-## Why this migration
-
-- Keep MPack’s MessagePack encode/decode behavior and sticky-error model.
-- Express the core in safe Rust (`Result`, enums, owned buffers) while exposing the
-  original C ABI for the frozen test suite.
-- Document every non-trivial divergence in [`DECISIONS.md`](DECISIONS.md).
+GitHub language bars overweight C because of the frozen suite and vendored ABI
+headers (`include/upstream/`), not because codecs ship as C sources. Non-trivial
+divergences live in [`DECISIONS.md`](DECISIONS.md).
 
 ## Repository layout
 
 | Path | Role |
 | --- | --- |
-| `src/` | Idiomatic Rust port (safe core + eventual FFI) |
-| `tests/original/` | Frozen C unit suite (do not edit) |
-| `tests/port/` | New Rust-side tests |
-| `fuzz/` | Differential fuzz (C oracle vs Rust safe core; WSL/Linux + cargo-fuzz) |
-| `bench/` | Benchmark methodology and results |
-| `tools/upstream_mpack.py` | Resolve, fetch, and optionally clean the pinned upstream MPack checkout |
-| `.port-mortem.toml` | Track, source URL, kickoff hashes |
-| `Dockerfile` | One-command buildable artifact |
+| `src/` | Safe core (`common` / `writer` / `reader` / `expect` / `node`) + `src/ffi/` |
+| `tests/original/` | Frozen C unit suite (**do not edit**) |
+| `tests/port/` | Rust tests; `frozen-link/` links the suite to the Rust library |
+| `include/upstream/` | Vendored MPack headers + `mpack-platform.c` for frozen-link |
+| `fuzz/` | Differential fuzz (C oracle vs safe core; WSL/Linux + cargo-fuzz) |
+| `bench/` | Fair C↔Rust FFI benchmarks |
+| `tools/upstream_mpack.py` | Fetch / path / cleanup for the pinned upstream checkout |
+| `.port-mortem.toml` | Source URL, version, kickoff hashes |
+| `Dockerfile` | Build + `cargo test` smoke image |
 
-## Build (Rust port)
+Differential fuzz and fair benchmarks resolve upstream from `.port-mortem.toml`
+into `target/upstream/mpack/pinned/` (`kickoff_hash`, with `source_version` tag
+fallback). There is no tracked `original_c/` tree.
+
+## Acceptance gates
+
+Green means the C harness prints `0 failures` and exits 0. The runner forwards
+that result; it does not rewrite failures into success.
+
+```bash
+# Writer lane (embed-writer layout)
+python3 tests/port/frozen-link/run.py --embed-writer
+
+# Reader / Expect / Node (+ related) under everything + full-suite-abi
+python3 tests/port/frozen-link/run.py --everything
+```
+
+Running frozen-link **without** a suite flag only builds the nil smoke probe —
+that is **not** a run of `tests/original/`. Details:
+[`tests/port/frozen-link/README.md`](tests/port/frozen-link/README.md).
+
+## Build and test
 
 ```bash
 cargo build
 cargo test
 ```
 
-Rust tests live under `tests/port/` only. Do not modify `tests/original/`.
-
-### C-to-Rust FFI slice
-
-The first vertical slice implements fixed-buffer nil encoding for the upstream
-`embed-writer` configuration:
+New Rust tests go under `tests/port/` only. Optional layout / ABI harness:
 
 ```bash
 cargo test --manifest-path tests/port/ffi-harness/Cargo.toml
 ```
-
-This command uses the platform C compiler through Cargo's `cc` build dependency.
-The test path is:
-
-```text
-Rust test runner -> C harness -> MPack C ABI -> safe Rust writer
-```
-
-The harness compiles the complete upstream MPack header chain with its own
-explicit `mpack-config.h`. It checks the C/Rust writer layout, header-inline
-accessors, `nil -> 0xc0`, sticky capacity errors, null-pointer hardening, and
-panic containment. The root build only compiles the C harness when the
-`ffi-harness` feature is enabled.
-
-## Docker (single command)
 
 ```bash
 docker build -t mpack-rust .
 docker run --rm mpack-rust
 ```
 
-The image builds the crate and runs `cargo test` as the runnable smoke artifact.
-
 ## Differential fuzz (WSL / Linux)
 
-Compare original C MPack against the Rust safe core with cargo-fuzz, plus an
-FFI crash harness:
+Requires nightly + cargo-fuzz and a C++ toolchain (`g++`).
 
 ```bash
 rustup toolchain install nightly
 cargo +nightly install cargo-fuzz
-# If default c++ is Clang, prefer: CXX=g++ RUSTFLAGS="-C linker=g++"
 python3 fuzz/run_all.py --seconds 60
-# or one target:
-cargo +nightly fuzz run reader_diff --fuzz-dir fuzz -- -max_len=65536
-# after review, remove the cached upstream checkout explicitly if desired:
+# optional cleanup after review:
 py -3 tools/upstream_mpack.py cleanup
 ```
 
-See [`fuzz/README.md`](fuzz/README.md) for the full target table, oracle
-details, symbol policy, linker pitfalls, and corpus layout.
+See [`fuzz/README.md`](fuzz/README.md).
 
-## Status
-
-Safe core + C ABI FFI for writer / reader / expect / node are in place.
-Frozen parity gates (`tests/port/frozen-link/`: `--embed-writer` and
-`--everything`) are the acceptance proof; see [`DECISIONS.md`](DECISIONS.md).
-
-Fair C-vs-Rust FFI benchmarks (identical C driver, everything features,
-forced tracking, release opts):
+## Fair benchmarks
 
 ```bash
 python3 bench/run.py
 ```
 
-Methodology and measured results: [`bench/methodology.md`](bench/methodology.md),
+Methodology and results: [`bench/methodology.md`](bench/methodology.md),
 [`bench/results.json`](bench/results.json).
+
+## Status
+
+Writer, reader, expect, and node safe core plus C-ABI FFI are in place. Frozen
+parity gates (`--embed-writer` / `--everything`) are the acceptance proof.
