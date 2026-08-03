@@ -19,10 +19,20 @@ pub const TRACKING_INITIAL_CAPACITY: usize = 3;
 #[cfg(not(feature = "full-suite-abi"))]
 pub const TRACKING_INITIAL_CAPACITY: usize = 8;
 
+// libc allocators: only used when `full-suite-abi` is off (`suite_malloc`/`free`/`realloc`).
+#[cfg(not(feature = "full-suite-abi"))]
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn realloc(pointer: *mut c_void, size: usize) -> *mut c_void;
     fn free(pointer: *mut c_void);
+}
+
+// libc stdio: non-full-suite paths, and cargo-test shims under full-suite-abi.
+#[cfg(any(
+    not(feature = "full-suite-abi"),
+    all(feature = "full-suite-abi", not(mpack_frozen_link))
+))]
+unsafe extern "C" {
     fn fopen(filename: *const c_char, mode: *const c_char) -> *mut c_void;
     fn fclose(file: *mut c_void) -> c_int;
     fn fread(data: *mut c_void, size: usize, count: usize, file: *mut c_void) -> usize;

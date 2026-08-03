@@ -60,7 +60,6 @@ const LONG_MAX: usize = c_long::MAX as usize;
 
 unsafe extern "C" {
     fn test_malloc(size: usize) -> *mut c_void;
-    fn test_free(pointer: *mut c_void);
     fn mpack_assert_fail(message: *const c_char);
     fn mpack_break_hit(message: *const c_char);
 }
@@ -3245,7 +3244,6 @@ fn print_node_to_vec(
         }
 
         // After processing a scalar or closing a compound, advance frames
-        current = ptr::null();
         loop {
             let Some(frame) = stack.last_mut() else {
                 return;
