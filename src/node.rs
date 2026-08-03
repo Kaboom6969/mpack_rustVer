@@ -1,11 +1,11 @@
 //! Tree / DOM parse + typed accessors (mirrors `mpack-node`).
 //!
-//! Public items here are a **frozen minimal safe-core contract**. Do not change
+//! Public items here are a **locked safe-core contract**. Do not change
 //! public signatures without lead approval; document semantic divergences from
 //! C in `DECISIONS.md` (Node table / hotspots).
 //!
-//! Out of scope for this module: stream/file init, C pools, `*_alloc`, and
-//! copying into C `char*` (FFI / lead).
+//! Out of scope for this module: stream/file init, C pools, `*_alloc`,
+//! copying into C `char*`, and the ABI `missing` node type (FFI / lead).
 
 use std::cell::Cell;
 
@@ -39,6 +39,14 @@ pub(crate) struct NodeData {
 pub struct Node<'tree, 'data> {
     tree: &'tree Tree<'data>,
     index: usize,
+}
+
+/// Key used by internal map lookup (C `mpack_node_map_*_impl`).
+#[derive(Debug, Clone, Copy)]
+enum MapKey<'a> {
+    Int(i64),
+    Uint(u64),
+    Str(&'a [u8]),
 }
 
 struct ParseFrame {
@@ -522,47 +530,100 @@ impl<'tree, 'data> Node<'tree, 'data> {
         }
     }
 
+    /// Finds a map value whose key is signed/unsigned equal to `key`.
+    ///
+    /// Missing or duplicate key flags `Error::Data` (required lookup).
+    pub fn map_int(self, key: i64) -> Option<Node<'tree, 'data>> {
+        self.map_lookup(MapKey::Int(key), true)
+    }
+
+    /// Optional variant of [`map_int`](Self::map_int): miss returns `None`
+    /// without sticky error; duplicate still flags `Error::Data`.
+    pub fn map_int_optional(self, key: i64) -> Option<Node<'tree, 'data>> {
+        self.map_lookup(MapKey::Int(key), false)
+    }
+
     /// Finds a map value whose key is unsigned/int equal to `key`.
     ///
-    /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
+    /// Missing or duplicate key flags `Error::Data` (required lookup).
     pub fn map_uint(self, key: u64) -> Option<Node<'tree, 'data>> {
-        if self.tree.error.get() != Error::Ok {
-            return None;
-        }
-        let Tag::Map(_) = self.tag() else {
-            self.tree.flag_error(Error::Type);
-            return None;
-        };
-        let node = self.tree.nodes.get(self.index)?;
-        for i in 0..(node.children.len() / 2) {
-            let key_index = node.children[i * 2];
-            let value_index = node.children[i * 2 + 1];
-            let key_tag = self
-                .tree
-                .nodes
-                .get(key_index)
-                .map(|n| n.tag)
-                .unwrap_or(Tag::Nil);
-            let matches = match key_tag {
-                Tag::Uint(value) => value == key,
-                Tag::Int(value) if value >= 0 => value as u64 == key,
-                _ => false,
-            };
-            if matches {
-                return Some(Node {
-                    tree: self.tree,
-                    index: value_index,
-                });
-            }
-        }
-        self.tree.flag_error(Error::Data);
-        None
+        self.map_lookup(MapKey::Uint(key), true)
+    }
+
+    /// Optional variant of [`map_uint`](Self::map_uint).
+    pub fn map_uint_optional(self, key: u64) -> Option<Node<'tree, 'data>> {
+        self.map_lookup(MapKey::Uint(key), false)
     }
 
     /// Finds a map value whose key is a str with exact byte contents `key`.
     ///
-    /// Missing key flags `Error::Data` (required lookup; see `DECISIONS.md`).
+    /// Missing or duplicate key flags `Error::Data` (required lookup).
     pub fn map_str(self, key: &[u8]) -> Option<Node<'tree, 'data>> {
+        self.map_lookup(MapKey::Str(key), true)
+    }
+
+    /// Optional variant of [`map_str`](Self::map_str).
+    pub fn map_str_optional(self, key: &[u8]) -> Option<Node<'tree, 'data>> {
+        self.map_lookup(MapKey::Str(key), false)
+    }
+
+    /// Returns whether the map contains a unique key equal to `key`.
+    pub fn map_contains_int(self, key: i64) -> bool {
+        self.map_lookup(MapKey::Int(key), false).is_some()
+            && self.tree.error.get() == Error::Ok
+    }
+
+    /// Returns whether the map contains a unique unsigned/int key equal to `key`.
+    pub fn map_contains_uint(self, key: u64) -> bool {
+        self.map_lookup(MapKey::Uint(key), false).is_some()
+            && self.tree.error.get() == Error::Ok
+    }
+
+    /// Returns whether the map contains a unique str key equal to `key`.
+    pub fn map_contains_str(self, key: &[u8]) -> bool {
+        self.map_lookup(MapKey::Str(key), false).is_some()
+            && self.tree.error.get() == Error::Ok
+    }
+
+    /// Matches this node's str payload against `strings`.
+    ///
+    /// Returns the matching index, or `strings.len()` when unmatched / not a
+    /// str. Required (`optional == false`) flags `Error::Type` on miss;
+    /// optional does not (C `mpack_node_enum` / `_optional`).
+    pub fn enum_str(self, strings: &[&[u8]], optional: bool) -> usize {
+        let count = strings.len();
+        if self.tree.error.get() != Error::Ok {
+            return count;
+        }
+        let Tag::Str(length) = self.tag() else {
+            if !optional {
+                self.tree.flag_error(Error::Type);
+            }
+            return count;
+        };
+        let Some(node) = self.tree.nodes.get(self.index) else {
+            self.tree.flag_error(Error::Bug);
+            return count;
+        };
+        let start = node.payload_off;
+        let end = start.saturating_add(length as usize);
+        let Some(bytes) = self.tree.data.get(start..end) else {
+            self.tree.flag_error(Error::Bug);
+            return count;
+        };
+        for (i, candidate) in strings.iter().enumerate() {
+            if *candidate == bytes {
+                return i;
+            }
+        }
+        if !optional {
+            self.tree.flag_error(Error::Type);
+        }
+        count
+    }
+
+    /// Shared map lookup with C-style duplicate-key diagnosis.
+    fn map_lookup(self, key: MapKey<'_>, required: bool) -> Option<Node<'tree, 'data>> {
         if self.tree.error.get() != Error::Ok {
             return None;
         }
@@ -571,29 +632,60 @@ impl<'tree, 'data> Node<'tree, 'data> {
             return None;
         };
         let node = self.tree.nodes.get(self.index)?;
+        let mut found: Option<usize> = None;
         for i in 0..(node.children.len() / 2) {
             let key_index = node.children[i * 2];
             let value_index = node.children[i * 2 + 1];
-            let Some(key_node) = self.tree.nodes.get(key_index) else {
+            if !self.key_matches(key_index, key) {
                 continue;
-            };
-            let Tag::Str(length) = key_node.tag else {
-                continue;
-            };
-            let start = key_node.payload_off;
-            let end = start.saturating_add(length as usize);
-            let Some(bytes) = self.tree.data.get(start..end) else {
-                continue;
-            };
-            if bytes == key {
-                return Some(Node {
-                    tree: self.tree,
-                    index: value_index,
-                });
+            }
+            if found.is_some() {
+                self.tree.flag_error(Error::Data);
+                return None;
+            }
+            found = Some(value_index);
+        }
+        match found {
+            Some(index) => Some(Node {
+                tree: self.tree,
+                index,
+            }),
+            None => {
+                if required {
+                    self.tree.flag_error(Error::Data);
+                }
+                None
             }
         }
-        self.tree.flag_error(Error::Data);
-        None
+    }
+
+    fn key_matches(self, key_index: usize, key: MapKey<'_>) -> bool {
+        let Some(key_node) = self.tree.nodes.get(key_index) else {
+            return false;
+        };
+        match key {
+            MapKey::Int(want) => match key_node.tag {
+                Tag::Int(value) => value == want,
+                Tag::Uint(value) => want >= 0 && value == want as u64,
+                _ => false,
+            },
+            MapKey::Uint(want) => match key_node.tag {
+                Tag::Uint(value) => value == want,
+                Tag::Int(value) if value >= 0 => value as u64 == want,
+                _ => false,
+            },
+            MapKey::Str(want) => {
+                let Tag::Str(length) = key_node.tag else {
+                    return false;
+                };
+                let start = key_node.payload_off;
+                let end = start.saturating_add(length as usize);
+                self.tree
+                    .data
+                    .get(start..end)
+                    .is_some_and(|bytes| bytes == want)
+            }
+        }
     }
 }
 

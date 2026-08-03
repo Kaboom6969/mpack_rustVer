@@ -21,7 +21,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | C-visible allocators | Suite hooks `test_malloc` / `test_free` (`MPACK_MALLOC` / `MPACK_FREE`) for pointers returned to C; under frozen-link also for file/track private buffers via `suite_libc` | Frozen everything links with `MPACK_FREE=test_free`, which adjusts `test_malloc_active`. Mixing libc `malloc` with suite `test_free` underflows the counter (`test-system.c`). |
 | Everything parity gate | Runner forwards C suite exit + `Unit testing complete. N failures` | Acceptance is the frozen harness itself (`tests/original/.../test.c`). Soft-abort / quiet printf are opt-in `--soft-continue` only (debug; still not fake green). `--expect-missing` removed. How-to: `tests/port/frozen-link/README.md`. |
 | Fair C↔Rust bench | `bench/`: same C driver; upstream C vs `full-suite-abi` staticlib; everything features + forced tracking; libc malloc (thin `test_*` identity wrappers for Rust symbol names) with **post-link `objdump` assert** that `test_free`→libc (else refuse `measured`); decode-only RSS in a fresh process; per-trial shuffled C/Rust order; release opts | Measures the C ABI path under 2B feature lock, not safe-core and not suite fail-injection allocators. Allocator gate prevents silent noop-`test_free` link wins. See `bench/methodology.md`. |
-| Hot-path opts (no new unsafe) | Bulk `write_bytes`/`write_header`; builder side-table skipped via `AtomicUsize` when no open builders; FFI drops safe-core `Vec<NodeData>` after ABI materialize; parse `children` pre-reserve | Encode/RSS gaps vs C are dual-layer tax. Keep `forbid(unsafe_code)` on safe core; do not grow `src/` unsafe counts. Gate: `--embed-writer` + `--everything` 0 failures, and `reader_diff`/`node_diff`/`total_diff` each 60s clean. |
+| Hot-path opts (no new unsafe) | Bulk `write_bytes`/`write_header`; builder side-table skipped via `AtomicUsize` when no open builders; parse `children` pre-reserve | Encode/RSS gaps vs C are dual-layer tax. Node FFI **retains** `NodeData` after materialize so lookups call safe-core (see Node table). Keep `forbid(unsafe_code)` on safe core; do not grow `src/` unsafe counts. Gate: `--embed-writer` + `--everything` 0 failures, and `reader_diff`/`node_diff`/`total_diff` each 60s clean. |
 
 ## FFI boundary and ownership
 
@@ -75,14 +75,18 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Safe-core surface | Minimal locked `Tree` / `Node` API (`type_`, `&[u8]` payloads, no `*_alloc`) | Contract for later FFI wrapping; stream/file/pool/`copy_*` / print-to-file stay in FFI. Signature changes need lead approval and a row here. |
+| Safe-core surface | Locked `Tree` / `Node` API: scalars, `&[u8]` payloads, map required/optional/contains, `enum_str`; no `*_alloc` | Lookup logic lives in safe-core; FFI is a thin C-ABI wrap. stream/file/pool/`copy_*` / print-to-file / `missing` type stay in FFI. Signature changes need a row here. |
 | Sticky errors on the tree | `Cell<Error>` shared through `&Tree` | Matches C `mpack_node_*` writing the tree error so accessors can flag through an immutable `Node` handle. |
 | `as_f32` | `Tag::Float` only (no int/double widen) | Intentional minimal freeze vs full C `mpack_node_float` widening. |
-| Required map lookup miss (`map_uint` / `map_str`) | Flag `Error::Data` | Optional/contains variants are not part of the locked surface. |
-| Duplicate map keys | Not diagnosed | Out of the minimal freeze; C may expose richer diagnostics in some paths. |
+| Required map lookup miss (`map_int` / `map_uint` / `map_str`) | Flag `Error::Data` | Matches C `mpack_node_wrap_lookup`. |
+| Optional map lookup miss (`map_*_optional`) | `None`, **no** sticky error | Matches C optional wrap → `missing` node; Rust uses `Option` (no `missing` type in safe-core). |
+| `map_contains_*` | `true` only on unique hit; miss → `false`; non-map → `Type`; duplicate → `Data` | Matches C `mpack_node_map_*_impl != NULL` semantics. |
+| `enum_str` | Index into `&[&[u8]]`; miss/non-str → `strings.len()`; required miss flags `Type`, optional does not | Matches C `mpack_node_enum` / `_optional`. |
+| Duplicate map keys | Diagnosed on map lookup paths → `Error::Data` | Aligns safe-core with C/FFI `map_search` / `mpack_node_map_*_impl`. |
+| Retain `NodeData` after ABI materialize | Keep graph + `abi_to_safe` / `safe_to_abi` in `FfiTreeState` | Lets map/contains/enum FFI call safe-core `Node` methods. Trades the prior RSS win (drop graph after materialize) for a single lookup implementation. |
 | `Tree::parse` nesting | Iterative heap stack (+ `possible_nodes`-style remaining-byte reserve) | Matches C iterative parse; depth-1200 suite case must not blow the Rust stack. Absurd compound counts → `Error::Invalid`. |
 | `Tree::size` / `parse_with_limits` | Expose consumed byte count; optional `max_nodes` → `TooBig` | Needed for `mpack_tree_size`, multi-message re-parse, and `init_pool` overflow. |
-| Node C ABI under `full-suite-abi` | Real FFI in `src/ffi/node.rs` with side-table keyed by tree pointer | C owns `mpack_tree_t` / `mpack_node_t`; Rust graph + heap/pool ABI slots live off-struct (writer-builder pattern). Optional/contains/enum/dup-key/narrow/widen/utf8/copy/alloc/print/stream stay FFI-only. |
+| Node C ABI under `full-suite-abi` | Real FFI in `src/ffi/node.rs` with side-table keyed by tree pointer | C owns `mpack_tree_t` / `mpack_node_t`; Rust graph + heap/pool ABI slots live off-struct. narrow/widen/utf8/copy/alloc/print/stream stay FFI-only; map/contains/enum go through retained safe-core. |
 | File init empty / oversize | Empty file → `invalid`; `max_bytes != 0` and size > max → `too_big` (no silent truncate) | Matches C `mpack_file_tree_read`. |
 | `tree.max_size` enforcement | Stream fill caps `owned_data` growth; do **not** reject `data_length > max_size` on parse of a preloaded buffer | C `max_size` is max **message** / fill accumulation, not whole multi-message buffer length. |
 | Stream incomplete sticky errors | Greedy blocking fill + one-shot safe-core parse remaps core `Invalid`/`Eof` → `IO`, or `TOO_BIG` when fill hit `max_size` | C `reserve_fill` flags `too_big` when more bytes would exceed `max_size`; blocking `mpack_tree_parse` flags `io` when a `read_fn` still leaves the message incomplete (without a prior sticky error). This FFI does not claim call-for-call parity with C's on-demand reserve fill, never-EOF blocking read functions, or incremental `try_parse` resume. |
@@ -132,8 +136,8 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 ### Safe-core surface shapes (Expect / Node)
 
 - **MPack**: Pointer-rich `mpack_expect_*` / `mpack_node_*` / pools / `*_alloc` / `char*` copies.
-- **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node stays the minimal locked `Tree` / `Node` list. Allocation and C string copies stay in `src/ffi/`.
-- **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; gate `test-node.c` under `--everything`.
+- **Rust intent**: Safe core uses `&[u8]` / `Option` / sticky `Error`; Expect stays free functions on `&mut Reader<'_>`; Node locked surface includes map required/optional/contains and `enum_str` (still no `*_alloc` / C string copies). Allocation and C string copies stay in `src/ffi/`.
+- **Status**: Safe-core Expect/Node and Reader/Expect/Node FFI are done; map/contains/enum lookups are implemented once in `src/node.rs` and called from FFI. Gate `test-node.c` under `--everything`, plus `node_diff` / `total_diff` 60s clean.
 - **Signature changes** to locked safe-core exports require lead approval and a row in the Expect / Node tables above.
 
 ## Differential fuzz (C oracle vs safe core)
