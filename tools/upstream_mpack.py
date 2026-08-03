@@ -69,6 +69,38 @@ def read_metadata() -> dict[str, str] | None:
     return json.loads(METADATA_FILE.read_text(encoding="utf-8"))
 
 
+def expected_metadata(
+    source_url: str,
+    source_version: str | None,
+    kickoff_hash: str | None,
+    *,
+    resolution_kind: str | None = None,
+    resolved_commit: str | None = None,
+) -> dict[str, str]:
+    metadata = {
+        "source_url": source_url,
+        "source_version": source_version or "",
+        "kickoff_hash": kickoff_hash or "",
+    }
+    if resolution_kind is not None:
+        metadata["resolution_kind"] = resolution_kind
+    if resolved_commit is not None:
+        metadata["resolved_commit"] = resolved_commit
+    return metadata
+
+
+def metadata_matches_pin(
+    metadata: dict[str, str] | None,
+    source_url: str,
+    source_version: str | None,
+    kickoff_hash: str | None,
+) -> bool:
+    if not metadata:
+        return False
+    expected = expected_metadata(source_url, source_version, kickoff_hash)
+    return all(metadata.get(key, "") == value for key, value in expected.items())
+
+
 def checkout_ref(repo_dir: Path, ref: str) -> bool:
     try:
         git(
@@ -119,6 +151,7 @@ def ensure_checkout() -> Path:
     if (
         metadata
         and PINNED_DIR.exists()
+        and metadata_matches_pin(metadata, source_url, source_version, kickoff_hash)
         and current_head(PINNED_DIR) == metadata.get("resolved_commit")
     ):
         return PINNED_DIR
@@ -141,13 +174,13 @@ def ensure_checkout() -> Path:
         )
         (temp_dir / ".resolved.json").write_text(
             json.dumps(
-                {
-                    "source_url": source_url,
-                    "source_version": source_version or "",
-                    "kickoff_hash": kickoff_hash or "",
-                    "resolution_kind": resolution_kind,
-                    "resolved_commit": resolved_commit,
-                },
+                expected_metadata(
+                    source_url,
+                    source_version,
+                    kickoff_hash,
+                    resolution_kind=resolution_kind,
+                    resolved_commit=resolved_commit,
+                ),
                 indent=2,
             )
             + "\n",
@@ -168,13 +201,22 @@ def ensure_checkout() -> Path:
 def cleanup_checkout() -> int:
     if not PINNED_DIR.exists():
         return 0
-    shutil.rmtree(PINNED_DIR, onexc=handle_remove_readonly)
+    remove_tree(PINNED_DIR)
     return 0
 
 
 def handle_remove_readonly(function, path: str, excinfo) -> None:
     os.chmod(path, stat.S_IWRITE)
     function(path)
+
+
+def remove_tree(path: Path) -> None:
+    kwargs = {"ignore_errors": False}
+    if sys.version_info >= (3, 12):
+        kwargs["onexc"] = handle_remove_readonly
+    else:
+        kwargs["onerror"] = handle_remove_readonly
+    shutil.rmtree(path, **kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:

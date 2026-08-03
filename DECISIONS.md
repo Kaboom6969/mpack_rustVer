@@ -6,7 +6,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Upstream C source for differential tooling | Fetch the pinned upstream checkout at runtime into `target/upstream/mpack/pinned/`; resolve `.port-mortem.toml` by trying `kickoff_hash` first and falling back to `source_version` tag refs when that hash is not an upstream MPack commit | Keeps the repo free of a tracked upstream source tree while preserving reproducible differential fuzz and fair benchmark inputs. |
+| Upstream C source for differential tooling | Fetch the pinned upstream checkout at runtime into `target/upstream/mpack/pinned/`; resolve `.port-mortem.toml` by trying `kickoff_hash` first and falling back to `source_version` tag refs when that hash is not an upstream MPack commit | Keeps the repo free of a tracked upstream source tree while preserving reproducible differential fuzz and fair benchmark inputs. Cached metadata must still match the current `source_url` / `source_version` / `kickoff_hash` pin fields before reuse. |
 | Original tests path | `tests/original/` | Port Mortem layout; tree hashed at kickoff (see `.port-mortem.toml`). **Do not modify.** |
 | New tests | `tests/port/` | Rust unit/integration tests that are not part of the frozen C suite. |
 | Differential fuzz | `fuzz/` (cargo-fuzz; C oracle vs safe core) | Optional parity finder; does not replace frozen-suite module gates. |

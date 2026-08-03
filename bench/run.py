@@ -101,7 +101,9 @@ def cflags(upstream_src: Path) -> list[str]:
 
 
 def native_libs() -> list[str]:
-    libs = ["-ldl", "-lpthread", "-lm"]
+    libs = ["-lpthread", "-lm"]
+    if os.name != "nt":
+        libs.insert(0, "-ldl")
     if os.name == "nt":
         libs.extend(
             ["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
