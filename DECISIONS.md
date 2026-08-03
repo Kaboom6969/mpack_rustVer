@@ -6,7 +6,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Keep `original_c/` at repo root | Keep (not relocated) | Reference sources + differential builds without disturbing kickoff layout already in the repo. |
+| Upstream C source for differential tooling | Fetch the pinned upstream checkout at runtime into `target/upstream/mpack/pinned/`; resolve `.port-mortem.toml` by trying `kickoff_hash` first and falling back to `source_version` tag refs when that hash is not an upstream MPack commit | Keeps the repo free of a tracked upstream source tree while preserving reproducible differential fuzz and fair benchmark inputs. Cached metadata must still match the current `source_url` / `source_version` / `kickoff_hash` pin fields before reuse. |
 | Original tests path | `tests/original/` | Port Mortem layout; tree hashed at kickoff (see `.port-mortem.toml`). **Do not modify.** |
 | New tests | `tests/port/` | Rust unit/integration tests that are not part of the frozen C suite. |
 | Differential fuzz | `fuzz/` (cargo-fuzz; C oracle vs safe core) | Optional parity finder; does not replace frozen-suite module gates. |
@@ -20,7 +20,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Everything-suite ABI | Cargo feature `full-suite-abi` | Switches `#[repr(C)]` to the upstream everything layout (extensions, tracking, builder, …). One library build cannot satisfy both layouts. |
 | C-visible allocators | Suite hooks `test_malloc` / `test_free` (`MPACK_MALLOC` / `MPACK_FREE`) for pointers returned to C; under frozen-link also for file/track private buffers via `suite_libc` | Frozen everything links with `MPACK_FREE=test_free`, which adjusts `test_malloc_active`. Mixing libc `malloc` with suite `test_free` underflows the counter (`test-system.c`). |
 | Everything parity gate | Runner forwards C suite exit + `Unit testing complete. N failures` | Acceptance is the frozen harness itself (`tests/original/.../test.c`). Soft-abort / quiet printf are opt-in `--soft-continue` only (debug; still not fake green). `--expect-missing` removed. How-to: `tests/port/frozen-link/README.md`. |
-| Fair C↔Rust bench | `bench/`: same C driver; upstream C vs `full-suite-abi` staticlib; everything features + forced tracking; libc malloc (thin `test_*` identity wrappers for Rust symbol names) with **post-link `objdump` assert** that `test_free`→libc (else refuse `measured`); decode-only RSS in a fresh process; per-trial shuffled C/Rust order; release opts | Measures the C ABI path under 2B feature lock, not safe-core and not suite fail-injection allocators. Allocator gate prevents silent noop-`test_free` link wins. See `bench/methodology.md`. |
+| Fair C↔Rust bench | `bench/`: same C driver; pinned upstream checkout vs `full-suite-abi` staticlib; everything features + forced tracking; libc malloc (thin `test_*` identity wrappers for Rust symbol names) with **post-link `objdump` assert** that `test_free`→libc (else refuse `measured`); decode-only RSS in a fresh process; per-trial shuffled C/Rust order; release opts | Measures the C ABI path under 2B feature lock, not safe-core and not suite fail-injection allocators. Allocator gate prevents silent noop-`test_free` link wins. The fetched checkout is retained until a manual cleanup step. See `bench/methodology.md`. |
 | Hot-path opts (no new unsafe) | Bulk `write_bytes`/`write_header`; builder side-table skipped via `AtomicUsize` when no open builders; parse `children` pre-reserve | Encode/RSS gaps vs C are dual-layer tax. Node FFI **retains** `NodeData` after materialize so lookups call safe-core (see Node table). Keep `forbid(unsafe_code)` on safe core; do not grow `src/` unsafe counts. Gate: `--embed-writer` + `--everything` 0 failures, and `reader_diff`/`node_diff`/`total_diff` each 60s clean. |
 
 ## FFI boundary and ownership
@@ -145,10 +145,11 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | Decision | Choice | Why |
 | --- | --- | --- |
 | Tooling | `cargo-fuzz` / libFuzzer under Linux or WSL (`fuzz/`) | Coverage-guided; matches Port Mortem “differential fuzzer” intent better than shelling out per input. |
-| C oracle | Compile `original_c/.../mpack-{common,platform,reader,writer,expect,node}.c` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C implementation as a separate object set. |
+| C oracle | Compile the pinned upstream checkout under `target/upstream/mpack/pinned/src/mpack/` into the fuzz binary behind `oracle_*` helpers | Frozen-link links the C *suite* to Rust FFI; differential needs the real C implementation as a separate object set. |
 | Rust side | `mpack` with `default-features = false` (Cargo feature `ffi` off) | Avoids `#[no_mangle]` clashes between Rust FFI and original C `mpack_*` symbols. Default builds keep `ffi` enabled. |
 | Embed / FFI tests | Frozen-link embed path passes `--features ffi`; FFI port tests use `required-features = ["ffi"]` (or `full-suite-abi`) | Do not rely on `default = ["ffi"]` alone — `--no-default-features` must not silently drop `mpack_*` from the embed cdylib. |
 | Targets | `reader_diff`, `node_diff`, `total_diff`, `expect_diff`, `writer_diff` in `fuzz/`; `ffi_crash` in `fuzz_ffi/` | Reader/node/total digests; expect opcode digest; writer read→rewrite transfer; FFI **crash-only** package (no C oracle — not parity evidence for expect/writer). Driver: `python3 fuzz/run_all.py`. |
+| Upstream fetch helper | `tools/upstream_mpack.py` with `ensure` / `path` / `cleanup` | Centralizes pinned upstream resolution from `.port-mortem.toml`, records the resolved commit in `.resolved.json`, keeps fetch logic out of `build.rs` and benchmark code, and makes wrapper-script cleanup explicit. |
 | Expect input | First byte = ops length; ops drive `mpack_expect_*`; remainder = MessagePack payload | Expect is schema-typed; unstructured MessagePack alone cannot exercise the surface. |
 | Expect error codes | Precise `error_to_c` sticky codes (same as reader/writer digests); op walk stops at first sticky error | After aligning safe-core `nil`/`bool`/`str` to C type-byte paths, Type/Invalid/Eof/TooBig remain comparable. Remaining map/array/bin/ext paths already match C's `read_tag`. |
 | Expect `str_match` harness | Expected bytes masked to 7-bit ASCII in both digests | Upstream C compares `uint8_t` payload to `char` expected; on signed-char hosts (Linux gcc default) bytes ≥ 0x80 falsely sticky `Type`. Safe-core `&[u8]` compare is correct; harness avoids the platform footgun rather than collapsing errors. |
@@ -158,7 +159,7 @@ Non-trivial divergences from MPack (C) and why. Update this file whenever behavi
 | `bytes_used` on error | Cleared to 0 in both digests when sticky error ≠ ok | C may consume partial payload bytes before flagging invalid; safe-core often stops earlier. Structure + error remain compared (intentional weakening for cursor noise). |
 | FFI LSan | `ffi_crash` runs with leak detection enabled | Under `cfg(fuzzing)`, `suite_libc` pairs `test_malloc`→`calloc` with real `test_free`→`free`; disabling LSan is no longer required for noop-free. |
 | libFuzzer `-max_len` | Document `-max_len=65536` in runbook (default is 4096) | Matches `ORACLE_MAX_INPUT` so large-input paths are reachable. |
-| Evidence | Optional `fuzz/log.txt` after timed clean runs; `fuzz/run_all.py` for sequential coverage | Documents smoke; not a substitute for frozen-suite module gates. |
+| Evidence | Optional `fuzz/log.txt` after timed clean runs; `fuzz/run_all.py` for sequential coverage | Documents smoke; not a substitute for frozen-suite module gates. The fetched checkout is retained; manual cleanup is available via `py -3 tools/upstream_mpack.py cleanup`. |
 
 ## Upstream C findings (suite / fuzz only)
 

@@ -1,5 +1,15 @@
 # Differential fuzz (C MPack vs Rust safe core) + FFI crash harness
 
+The C oracle is fetched at runtime from `.port-mortem.toml` and cached under:
+
+```text
+target/upstream/mpack/pinned/
+```
+
+Resolution order is:
+1. `kickoff_hash` if it is a valid upstream MPack commit
+2. `source_version` tag (`v<version>` first, then `<version>`)
+
 ## Packages
 
 | Package | Role |
@@ -55,8 +65,10 @@ python3 fuzz/run_all.py --seconds 10     # shorter smoke
 python3 fuzz/run_all.py --seconds 0 --runs 100
 ```
 
-`run_all.py` sets `CXX=g++` / `RUSTFLAGS=-C linker=g++` when unset, then runs
-every target above in order and exits non-zero if any fail.
+`run_all.py` sets `CXX=g++` / `RUSTFLAGS=-C linker=g++` when unset, resolves the
+pinned upstream checkout before the first target build, then runs every target
+above in order and exits non-zero if any fail. It does not delete the fetched
+checkout automatically.
 
 ## Run individually
 
@@ -71,11 +83,19 @@ cargo +nightly fuzz run ffi_crash --fuzz-dir fuzz_ffi -- -max_len=65536
 # timed smoke
 cargo +nightly fuzz run expect_diff --fuzz-dir fuzz -- \
   -max_total_time=60 -max_len=65536
+
+# manual cleanup after review
+py -3 tools/upstream_mpack.py cleanup
 ```
 
 libFuzzer’s default `-max_len` is **4096**, while the oracle caps at
 `ORACLE_MAX_INPUT` / `MAX_INPUT_LEN` (**65536**). Pass `-max_len=65536` when
 you want coverage of the large-input truncation path.
+
+Direct `cargo +nightly fuzz run ...` still auto-fetches the pinned upstream
+checkout through `fuzz/build.rs`, but it does not auto-clean on exit. Use the
+helper script above only when you want to remove the fetched checkout manually
+after the run is complete.
 
 Seeds live under `corpus/<target>/` (and `fuzz_ffi/corpus/ffi_crash/`).
 Artifacts and `*/target/` are gitignored. Hex-named libFuzzer units under
@@ -86,7 +106,7 @@ Artifacts and `*/target/` are gitignored. Hex-named libFuzzer units under
 ```text
 fuzz/
   Cargo.toml          # mpack-fuzz package (cargo-fuzz metadata)
-  build.rs            # compiles original C + oracle_*.c
+  build.rs            # resolves pinned upstream C + compiles oracle_*.c
   run_all.py          # sequential driver for all targets
   c/                  # mpack-config.h + oracle helpers
   src/                # Rust digest mirror + oracle FFI

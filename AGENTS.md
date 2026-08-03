@@ -3,7 +3,8 @@
 ## Cursor Cloud specific instructions
 
 This repo is a **Port Mortem** project: porting the C **MPack** MessagePack library
-(`original_c/mpack-develop/`) to Rust (`src/`, `Cargo.toml`) via a C-ABI FFI layer.
+from the pinned upstream kickoff commit recorded in `.port-mortem.toml` to Rust
+(`src/`, `Cargo.toml`) via a C-ABI FFI layer.
 The frozen C unit suite lives under `tests/original/` (do not edit it; see
 `.cursor/rules/port-mortem-core.mdc`). Divergences go in `DECISIONS.md`.
 
@@ -13,8 +14,9 @@ The frozen C unit suite lives under `tests/original/` (do not edit it; see
   `cargo fetch` when `Cargo.toml` exists.
 
 ### Building / running the reference C library + unit suite
-- The C reference implementation and its unit suite live under
-  `original_c/mpack-develop/`.
+- Differential fuzzing and fair benchmarks fetch the pinned upstream MPack
+  checkout into `target/upstream/mpack/pinned/` via
+  `tools/upstream_mpack.py`.
 - **Use `CC=gcc`.** The default `cc` is Clang 18, which compiles the pure-C variants
   fine but cannot locate the libstdc++ C++ headers (`<limits>` "file not found"), so
   the `c++11` variant in the `more`/`all` targets fails under Clang. `gcc` builds
@@ -22,9 +24,11 @@ The frozen C unit suite lives under `tests/original/` (do not edit it; see
 - The `tools/*.sh` helper scripts are not marked executable; invoke them via an
   interpreter (e.g. `python3 test/unit/configure.py`, `sh tools/unit.sh ...`) or call
   the tools directly.
-- Configure + run (from `original_c/mpack-develop/`):
-  - `CC=gcc python3 test/unit/configure.py`  → generates `.build/unit/build.ninja`
-  - `CC=gcc ninja -f .build/unit/build.ninja more`  → builds + runs the CI "more" set
+- Configure + run (from the fetched pinned upstream checkout):
+  - `python3 tools/upstream_mpack.py ensure`  → prints the fetched `src/` path
+  - from `target/upstream/mpack/pinned/`, run:
+    - `CC=gcc python3 test/unit/configure.py`  → generates `.build/unit/build.ninja`
+    - `CC=gcc ninja -f .build/unit/build.ninja more`  → builds + runs the CI "more" set
     (default/everything/embed/no-float/gnu89/c++11/lto). Other targets: a single
     `run-<config>` (e.g. `run-everything-debug`), `all`, or `help`.
 - A passing run prints `Unit testing complete. 0 failures in <N> checks.` per variant.
