@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
 use std::io::Write as IoWrite;
+use std::panic::{catch_unwind, AssertUnwindSafe, resume_unwind};
 use std::ptr;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
@@ -388,6 +389,13 @@ fn abi_node_from_safe(tree: *mut MpackTree, s: &mut FfiTreeState, safe_idx: usiz
 ///
 /// Temporarily rebuilds a [`Tree`] from retained `NodeData`, syncs sticky
 /// errors back to the C tree, and restores side-table state.
+///
+/// Returns `None` when `node` is not a heap/pool ABI node (e.g. embedded
+/// `nil_node` / `missing_node` sentinels). Callers that need C's type check on
+/// sentinels must inspect `nd_type` before calling this.
+///
+/// If `f` panics, the `NodeData` graph is restored before the panic resumes so
+/// later lookups do not permanently fail closed.
 fn with_core_node<R>(node: MpackNode, f: impl FnOnce(crate::node::Node<'_, '_>) -> R) -> Option<R> {
     if node.tree.is_null() {
         return None;
@@ -416,22 +424,45 @@ fn with_core_node<R>(node: MpackNode, f: impl FnOnce(crate::node::Node<'_, '_>) 
         let root = s.root;
         let size = s.size;
         let core = Tree::from_parts(data, nodes, root, abi_error_to_core(prior_abi_error), size);
-        let core_node = core.node_at(safe_idx);
-        let result = f(core_node);
+        // Borrow via raw pointer so a panic in `f` does not drop `core` before
+        // we can `into_parts` and put the graph back into the side-table.
+        let core_ptr = &core as *const Tree<'_>;
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: `core` is pinned on this stack for the duration of `f`.
+            let core_ref = unsafe { &*core_ptr };
+            f(core_ref.node_at(safe_idx))
+        }));
         let new_error = core.error();
         let (nodes, root, _, size) = core.into_parts();
         s.nodes = nodes;
         s.root = root;
         s.size = size;
-        Some((result, new_error))
+        match unwind {
+            Ok(result) => Some(Ok((result, new_error))),
+            Err(payload) => Some(Err(payload)),
+        }
     })?;
 
-    let (result, new_error) = outcome;
-    let new_abi = core_error_to_abi(new_error);
-    if new_abi != MPACK_OK && prior_abi_error == MPACK_OK {
-        flag_tree_error(tree, new_abi);
+    match outcome {
+        Ok((result, new_error)) => {
+            let new_abi = core_error_to_abi(new_error);
+            if new_abi != MPACK_OK && prior_abi_error == MPACK_OK {
+                flag_tree_error(tree, new_abi);
+            }
+            Some(result)
+        }
+        Err(payload) => resume_unwind(payload),
     }
-    Some(result)
+}
+
+/// C `mpack_node_map_*_impl` type gate: non-maps (including nil/missing
+/// sentinels) sticky-`Type` before any key search.
+fn ensure_abi_map(node: MpackNode) -> bool {
+    if nd_type(node) != TYPE_MAP {
+        flag_tree_error(node.tree, MPACK_ERROR_TYPE);
+        return false;
+    }
+    true
 }
 
 fn core_map_required(
@@ -444,12 +475,20 @@ fn core_map_required(
     if node_tree_error(node) != MPACK_OK {
         return nil_node_for(node.tree);
     }
+    if !ensure_abi_map(node) {
+        return nil_node_for(node.tree);
+    }
     let found = with_core_node(node, lookup);
     match found {
         Some(Some(safe_idx)) => with_state(node.tree, nil_node_for(node.tree), |s| {
             abi_node_from_safe(node.tree, s, safe_idx)
         }),
-        _ => nil_node_for(node.tree),
+        Some(None) => nil_node_for(node.tree),
+        None => {
+            // Typed as map in ABI but not resolvable in the retained graph.
+            flag_tree_error(node.tree, MPACK_ERROR_BUG);
+            nil_node_for(node.tree)
+        }
     }
 }
 
@@ -461,6 +500,10 @@ fn core_map_optional(
         return MpackNode::null();
     }
     if node_tree_error(node) != MPACK_OK {
+        return nil_node_for(node.tree);
+    }
+    if !ensure_abi_map(node) {
+        // C: impl flags Type then wrap_optional returns nil (not missing).
         return nil_node_for(node.tree);
     }
     let found = with_core_node(node, lookup);
@@ -2470,6 +2513,15 @@ fn node_enum_via_core(
     if node_tree_error(node) != MPACK_OK {
         return count;
     }
+    // C `mpack_node_enum_optional`: non-str (incl. nil/missing sentinels) →
+    // return count; required then flags Type. Do this before the core bridge so
+    // embedded sentinels match C instead of silently returning count.
+    if nd_type(node) != TYPE_STR {
+        if !optional {
+            flag_tree_error(node.tree, MPACK_ERROR_TYPE);
+        }
+        return count;
+    }
     // Own the C string bytes so views remain valid across the core call.
     let mut owned: Vec<Vec<u8>> = Vec::with_capacity(count);
     if !strings.is_null() {
@@ -2483,7 +2535,13 @@ fn node_enum_via_core(
         }
     }
     let views: Vec<&[u8]> = owned.iter().map(|s| s.as_slice()).collect();
-    with_core_node(node, |n| n.enum_str(&views, optional)).unwrap_or(count)
+    match with_core_node(node, |n| n.enum_str(&views, optional)) {
+        Some(v) => v,
+        None => {
+            flag_tree_error(node.tree, MPACK_ERROR_BUG);
+            count
+        }
+    }
 }
 
 #[no_mangle]
@@ -2834,17 +2892,31 @@ pub unsafe extern "C" fn mpack_node_map_cstr_optional(
 
 // ── contains checks ───────────────────────────────────────────────────────────
 
+fn core_map_contains(
+    node: MpackNode,
+    check: impl FnOnce(crate::node::Node<'_, '_>) -> bool,
+) -> bool {
+    if node_tree_error(node) != MPACK_OK {
+        return false;
+    }
+    if !ensure_abi_map(node) {
+        return false;
+    }
+    match with_core_node(node, check) {
+        Some(v) => v,
+        None => {
+            flag_tree_error(node.tree, MPACK_ERROR_BUG);
+            false
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mpack_node_map_contains_int(node: MpackNode, num: i64) -> bool {
     if node.tree.is_null() {
         return false;
     }
-    match catch_ffi_panic(|| {
-        if node_tree_error(node) != MPACK_OK {
-            return false;
-        }
-        with_core_node(node, |n| n.map_contains_int(num)).unwrap_or(false)
-    }) {
+    match catch_ffi_panic(|| core_map_contains(node, |n| n.map_contains_int(num))) {
         Ok(v) => v,
         Err(_) => {
             flag_tree_error(node.tree, MPACK_ERROR_BUG);
@@ -2858,12 +2930,7 @@ pub unsafe extern "C" fn mpack_node_map_contains_uint(node: MpackNode, num: u64)
     if node.tree.is_null() {
         return false;
     }
-    match catch_ffi_panic(|| {
-        if node_tree_error(node) != MPACK_OK {
-            return false;
-        }
-        with_core_node(node, |n| n.map_contains_uint(num)).unwrap_or(false)
-    }) {
+    match catch_ffi_panic(|| core_map_contains(node, |n| n.map_contains_uint(num))) {
         Ok(v) => v,
         Err(_) => {
             flag_tree_error(node.tree, MPACK_ERROR_BUG);
@@ -2882,15 +2949,12 @@ pub unsafe extern "C" fn mpack_node_map_contains_str(
         return false;
     }
     match catch_ffi_panic(|| {
-        if node_tree_error(node) != MPACK_OK {
-            return false;
-        }
         let key: &[u8] = if str_.is_null() || length == 0 {
             &[][..]
         } else {
             unsafe { slice::from_raw_parts(str_.cast::<u8>(), length) }
         };
-        with_core_node(node, |n| n.map_contains_str(key)).unwrap_or(false)
+        core_map_contains(node, |n| n.map_contains_str(key))
     }) {
         Ok(v) => v,
         Err(_) => {
@@ -2909,12 +2973,7 @@ pub unsafe extern "C" fn mpack_node_map_contains_cstr(
         return false;
     }
     let key = unsafe { CStr::from_ptr(cstr).to_bytes() };
-    match catch_ffi_panic(|| {
-        if node_tree_error(node) != MPACK_OK {
-            return false;
-        }
-        with_core_node(node, |n| n.map_contains_str(key)).unwrap_or(false)
-    }) {
+    match catch_ffi_panic(|| core_map_contains(node, |n| n.map_contains_str(key))) {
         Ok(v) => v,
         Err(_) => {
             flag_tree_error(node.tree, MPACK_ERROR_BUG);

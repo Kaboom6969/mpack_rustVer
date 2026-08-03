@@ -73,6 +73,41 @@ fn map_optional_miss_does_not_sticky() {
 }
 
 #[test]
+fn map_required_miss_flags_data() {
+    let data = [0x81, 0xa1, b'a', 0xc0];
+    let tree = Tree::parse(&data);
+    let root = tree.root().expect("root");
+    assert!(root.map_str(b"nope").is_none());
+    assert_eq!(tree.error(), Error::Data);
+
+    let tree2 = Tree::parse(&data);
+    let root2 = tree2.root().expect("root");
+    assert!(root2.map_uint(99).is_none());
+    assert_eq!(tree2.error(), Error::Data);
+}
+
+#[test]
+fn map_int_uint_cross_key() {
+    // map { -1 => true } — uint lookup must not match negative int key
+    let data = [0x81, 0xff, 0xc3];
+    let tree = Tree::parse(&data);
+    let root = tree.root().expect("root");
+    assert!(root.map_int(-1).expect("key -1").as_bool().unwrap());
+    assert_eq!(tree.error(), Error::Ok);
+
+    let tree2 = Tree::parse(&data);
+    let root2 = tree2.root().expect("root");
+    assert!(root2.map_uint(u64::MAX).is_none());
+    assert_eq!(tree2.error(), Error::Data);
+
+    // map { 7 => nil } — int lookup accepts non-negative uint key
+    let data3 = [0x81, 0x07, 0xc0];
+    let tree3 = Tree::parse(&data3);
+    let root3 = tree3.root().expect("root");
+    assert!(root3.map_int(7).expect("key 7").is_nil());
+}
+
+#[test]
 fn map_contains_and_int_lookup() {
     // map { 7 => true, -3 => nil }
     let data = [0x82, 0x07, 0xc3, 0xfd, 0xc0];
