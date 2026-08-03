@@ -365,6 +365,7 @@ pub struct MpackTree {
 
 #[cfg(feature = "full-suite-abi")]
 impl MpackTree {
+    #[allow(dead_code)] // mirrors reader helper; not yet used on tree error paths
     pub(crate) fn unsupported() -> Self {
         Self {
             error_fn: None,

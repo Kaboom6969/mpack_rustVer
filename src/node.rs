@@ -139,10 +139,12 @@ impl<'data> Tree<'data> {
         }
     }
 
+    #[allow(dead_code)] // retained for FFI/debug helpers; not on the locked public surface
     pub(crate) fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
+    #[allow(dead_code)] // retained for FFI/debug helpers; not on the locked public surface
     pub(crate) fn nodes(&self) -> &[NodeData] {
         &self.nodes
     }
